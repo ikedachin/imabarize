@@ -1,0 +1,17 @@
+# environment
+/.venv
+uv.lock
+
+# pycache
+__pycache__/
+*.pyc
+
+# yamls with secrets
+/yamls/*.yaml
+
+!/yamls/*_format.yaml
+
+
+# data 
+test_source/JaQuAD_jsonls/*
+test_source/.gitkeep
