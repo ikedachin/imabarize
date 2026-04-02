@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Tuple, Union
 
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor
-
+from commons.utils_msg import msg_debug, msg_success, msg_error, msg_info
 
 class QAPipeline:
     def __init__(self, settings: Dict):
@@ -127,10 +127,12 @@ class QAPipeline:
                     temperature=temperature,
                     top_p=top_p,
                 )
-                try:
-                    return response.choices[0].message.content.strip()
-                except:
-                    return response.choices[0].message.content
+                content = response.choices[0].message.content
+                if content is None:
+                    return ""
+                if isinstance(content, str):
+                    return content.strip()
+                return str(content).strip()
 
             except Exception as e:
                 last_exc = e
@@ -140,8 +142,9 @@ class QAPipeline:
                     sleep = min((self.wait_seconds * (2 ** i)) + random.random() * 0.2, 10.0)
                     time.sleep(sleep)
                     continue
-
-                raise  # その他は即死
+            if i == self.max_retries - 1:
+                print(msg_error(f"Inference failed after {self.max_retries} attempts. last_error={last_exc}"))
+                # raise  # その他は即死
 
         # raise RuntimeError(f"Inference retry exhausted. last_error={last_exc}")
         return ""
@@ -156,75 +159,20 @@ class QAPipeline:
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
             return list(executor.map(self._infer_text, prompts))
             
-    def _extract_tag(self, text: str, tag: str) -> str:
+    def _extract_tag(self, text: Optional[str], tag: str) -> str:
+        if (not text) or (not isinstance(text, str)):
+            return ""
+        text = str(text)
         start_tag = f"<{tag}>"
         end_tag = f"</{tag}>"
-        if start_tag in text:
+        if (start_tag in text) and (end_tag in text):
             text = text.split(start_tag)[-1]
-        if end_tag in text:
+            text = text.split(end_tag)[0]
+        elif start_tag in text:
+            text = text.split(start_tag)[-1]
+        elif end_tag in text:
             text = text.split(end_tag)[0]
         return text.strip()
-
-    def create_qa(self, text: str) -> Dict[str, str]:
-        question_prompt = self.prompts.get("question_prompt", None)
-        thinking_prompt = self.prompts.get("thinking_prompt", None)
-        answer_prompt = self.prompts.get("answer_prompt", None)
-        refine_question_prompt = self.prompts.get("refine_question_prompt", None)
-        refine_thinking_prompt = self.prompts.get("refine_thinking_prompt", None)
-        refine_answer_prompt = self.prompts.get("refine_answer_prompt", None)
-
-        if not question_prompt or not answer_prompt:
-            raise ValueError("question_prompt and answer_prompt must be set in prompts.")
-
-        random_token = "".join(random.sample(text, min(len(text), 10))) if text else ""
-        formatted_question_prompt = question_prompt.format(
-            text=text, random_token=random_token
-        )
-        question_text = self._infer_text(formatted_question_prompt)
-        question_text = self._extract_tag(question_text, "question")
-
-        if refine_question_prompt:
-            formatted_refined_question = refine_question_prompt.format(
-                text=text, question=question_text
-            )
-            refined_question_text = self._infer_text(formatted_refined_question)
-            question_text = self._extract_tag(refined_question_text, "question")
-
-        formatted_answer_prompt = answer_prompt.format(text=text, question=question_text)
-        answer_text = self._infer_text(formatted_answer_prompt)
-        answer_text = self._extract_tag(answer_text, "answer")
-
-        if thinking_prompt:
-            formatted_thinking_prompt = thinking_prompt.format(
-                text=text, question=question_text, answer=answer_text
-            )
-            thinking_text = self._infer_text(formatted_thinking_prompt)
-            thinking_text = self._extract_tag(thinking_text, "thinking")
-        else:
-            thinking_text = ""
-
-        if refine_thinking_prompt:
-            formatted_refined_thinking = refine_thinking_prompt.format(
-                text=text, question=question_text, thought=thinking_text, answer=answer_text
-            )
-            refined_thinking_text = self._infer_text(formatted_refined_thinking)
-            thinking_text = self._extract_tag(refined_thinking_text, "thinking")
-
-        if refine_answer_prompt:
-            formatted_refined_answer = refine_answer_prompt.format(
-                text=text, question=question_text, thought=thinking_text, answer=answer_text
-            )
-            refined_answer_text = self._infer_text(formatted_refined_answer)
-            answer_text = self._extract_tag(refined_answer_text, "answer")
-
-        return {
-            "question": question_text,
-            "thinking": thinking_text if thinking_prompt else "",
-            "answer": answer_text,
-            "refined_thinking": thinking_text if refine_thinking_prompt else "",
-            "refined_answer": answer_text if refine_answer_prompt else "",
-            "qa_generator": self.inference_config.get("MODEL_NAME", ""),
-        }
 
     def create_qa_batch(self, texts: List[str], batch_size: int) -> List[Dict[str, str]]:
         if not texts:
@@ -233,10 +181,15 @@ class QAPipeline:
         question_prompt = self.prompts.get("question_prompt", None)
         thinking_prompt = self.prompts.get("thinking_prompt", None)
         answer_prompt = self.prompts.get("answer_prompt", None)
-        refine_question_prompt = self.prompts.get("refine_question_prompt", None)
-        refine_thinking_prompt = self.prompts.get("refine_thinking_prompt", None)
-        refine_answer_prompt = self.prompts.get("refine_answer_prompt", None)
+        # refine_question_prompt = self.prompts.get("refine_question_prompt", None)
+        # refine_thinking_prompt = self.prompts.get("refine_thinking_prompt", None)
+        # refine_answer_prompt = self.prompts.get("refine_answer_prompt", None)
+        
+        # ==========================================================
+        # ここでquestion_textを生成する
+        # ==========================================================
 
+        
         if not question_prompt or not answer_prompt:
             raise ValueError("question_prompt and answer_prompt must be set in prompts.")
 
@@ -247,73 +200,56 @@ class QAPipeline:
             question_prompt.format(text=text, random_token=random_token)
             for text, random_token in zip(texts, random_tokens)
         ]
+
         question_texts = [
             self._extract_tag(text, "question")
             for text in self._infer_texts(question_prompts, batch_size)
         ]
 
-        if refine_question_prompt:
-            refine_question_prompts = [
-                refine_question_prompt.format(text=text, question=question_text)
-                for text, question_text in zip(texts, question_texts)
-            ]
-            question_texts = [
-                self._extract_tag(text, "question")
-                for text in self._infer_texts(refine_question_prompts, batch_size)
-            ]
+        # ==========================================================
+        # ここでanswer_textを生成する
+        # ==========================================================
 
         answer_prompts = [
             answer_prompt.format(text=text, question=question_text)
             for text, question_text in zip(texts, question_texts)
         ]
         answer_texts = [
-            self._extract_tag(text, "answer")
+            self._extract_tag(text, "think")
             for text in self._infer_texts(answer_prompts, batch_size)
         ]
 
-        if thinking_prompt:
-            thinking_prompts = [
-                thinking_prompt.format(text=text, question=question_text, answer=answer_text)
-                for text, question_text, answer_text in zip(texts, question_texts, answer_texts)
-            ]
-            thinking_texts = [
-                self._extract_tag(text, "thinking")
-                for text in self._infer_texts(thinking_prompts, batch_size)
-            ]
-        else:
-            thinking_texts = ["" for _ in texts]
+        # ==========================================================
+        # ここでthinking_textを生成する
+        # ==========================================================
 
-        if refine_thinking_prompt:
-            refine_thinking_prompts = [
-                refine_thinking_prompt.format(
-                    text=text, question=question_text, thought=thinking_text, answer=answer_text
-                )
-                for text, question_text, thinking_text, answer_text in zip(
-                    texts, question_texts, thinking_texts, answer_texts
-                )
-            ]
-            thinking_texts = [
-                self._extract_tag(text, "thinking")
-                for text in self._infer_texts(refine_thinking_prompts, batch_size)
-            ]
+        thinking_prompts = [
+            thinking_prompt.format(text=text, question=question_text, answer=answer_text)
+            for text, question_text, answer_text in zip(texts, question_texts, answer_texts)
+        ]
+        think_texts = [
+            self._extract_tag(text, "think")
+            for text in self._infer_texts(thinking_prompts, batch_size)
+        ]
 
-        if refine_answer_prompt:
-            refine_answer_prompts = [
-                refine_answer_prompt.format(
-                    text=text, question=question_text, thought=thinking_text, answer=answer_text
-                )
-                for text, question_text, thinking_text, answer_text in zip(
-                    texts, question_texts, thinking_texts, answer_texts
-                )
-            ]
-            answer_texts = [
-                self._extract_tag(text, "answer")
-                for text in self._infer_texts(refine_answer_prompts, batch_size)
-            ]
+        think_texts = [
+            self._extract_tag(text, "think")
+            for text in think_texts
+        ]
+        think_texts = [
+            self._extract_tag(text, "thinking")
+            for text in think_texts
+        ]
+
+
+        # ==========================================================
+        # データセット化
+        # ==========================================================
+
 
         results = []
         for question_text, thinking_text, answer_text in zip(
-            question_texts, thinking_texts, answer_texts
+            question_texts, think_texts, answer_texts
         ):
             if question_text and answer_text:
                 results.append(
@@ -321,8 +257,8 @@ class QAPipeline:
                         "question": question_text,
                         "thinking": thinking_text if thinking_prompt else "",
                         "answer": answer_text,
-                        "refined_thinking": thinking_text if refine_thinking_prompt else "",
-                        "refined_answer": answer_text if refine_answer_prompt else "",
+                        # "refined_thinking": thinking_text if refine_thinking_prompt else "",
+                        # "refined_answer": answer_text if refine_answer_prompt else "",
                         "qa_generator": self.inference_config.get("MODEL_NAME", ""),
                     }
                 )
@@ -330,8 +266,22 @@ class QAPipeline:
                 pass
         return results
 
-    def _append_jsonl(self, save_path: Path, result: Dict) -> None:
-        save_path.parent.mkdir(parents=True, exist_ok=True)
+    def append_jsonl(self, save_path: Path, result: Dict) -> None:
+        keys = result.keys()
+        flag = True
+        for key in keys:
+            if not result[key]:
+                flag = False
+                break
+
+        if flag:
+            save_path.parent.mkdir(parents=True, exist_ok=True)
+            with open(save_path, "a", encoding="utf-8") as f:
+                json.dump(result, f, ensure_ascii=False)
+                f.write("\n")
+
+    def add_cache(self, entry_id: str) -> None:
+        # キャッシュ用のIDをファイルに保存するなどの実装をここに追加
+        save_path = self.output_dir / "cache_ids.txt"
         with open(save_path, "a", encoding="utf-8") as f:
-            json.dump(result, f, ensure_ascii=False)
-            f.write("\n")
+            f.write(f"{entry_id}\n")

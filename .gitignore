@@ -15,3 +15,5 @@ __pycache__/
 # data 
 test_source/JaQuAD_jsonls/*
 test_source/.gitkeep
+
+test_output/*

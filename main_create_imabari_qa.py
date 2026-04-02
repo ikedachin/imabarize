@@ -144,6 +144,18 @@ def process_json_files(
 
     print(msg_success(f"Processing {len(json_files)} JSON/JSONL file(s)."))
 
+    # # ここにキャッシュファイルを読んで、処理ずみのIDのデータを削除する処理を入れる
+    output_path = Path(pipeline.settings.get("output_path", "./output")).expanduser().resolve()
+    # cache_file = output_path / ".cache.jsonl"
+    # cache = []
+    # if cache_file.exists():
+    #     with cache_file.open("r", encoding="utf-8") as f:
+    #         for line in f:
+    #             line = line.strip()
+    #             if not line:
+    #                 continue
+    #             cache.append(json.loads(line))
+
     for file_path in json_files:
         entries = load_json_entries(file_path)
         if not entries:
@@ -151,7 +163,7 @@ def process_json_files(
             continue
         print(msg_info(f"Loaded {len(entries)} entries from {file_path.name}."))
 
-        output_jsonl = pipeline.output_dir / f"{file_path.stem}.jsonl"
+        output_jsonl = output_path / f"{file_path.stem}.jsonl"
         for start in tqdm.tqdm(range(0, len(entries), batch_size), desc=f"Entries / {file_path.name}"):
             if (start + 1) < start_index:
                 print(msg_info(f"Skipping {file_path.name} rows {start + 1}-{start + batch_size} for resume."))
@@ -160,21 +172,24 @@ def process_json_files(
             print(msg_info(f"JSON batch {start // batch_size + 1} rows {start + 1}-{end} / {len(entries)}"))
 
             batch_texts: List[str] = []
+            ids = []
             for entry in entries[start:end]:
                 value = entry.get(target_key)
                 if not value or not isinstance(value, str):
                     print(msg_debug(f"Entry missing target key {target_key} in {file_path.name}: {entry}"))
                     continue
                 batch_texts.append(value)
+                ids.append(entry.get("id", str(uuid.uuid4())))
 
             if not batch_texts:
                 continue
 
             results = pipeline.create_qa_batch(batch_texts, batch_size=batch_size)
-            for result in results:
+            for result, entry_id in zip(results, ids):
                 result["source_files"] = [str(file_path.name)]
-                result["id"] = str(uuid.uuid4())
-                pipeline._append_jsonl(output_jsonl, result)
+                result["id"] = entry_id
+                pipeline.append_jsonl(output_jsonl, result)
+                pipeline.add_cache(entry_id)
 
         print(msg_info(f"Saved QA to: {output_jsonl}"))
 
