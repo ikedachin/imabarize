@@ -92,9 +92,9 @@ def process_text_files(
     for file_path in text_files:
         parent_name = get_parent_book_name(file_path)
         parent_outputs[parent_name] = output_dir / f"{parent_name}.jsonl"
-    for output_jsonl in set(parent_outputs.values()):
-        if output_jsonl.exists():
-            output_jsonl.unlink()
+    # for output_jsonl in set(parent_outputs.values()):
+    #     if output_jsonl.exists():
+    #         output_jsonl.unlink()
 
     for start in tqdm.tqdm(range(0, len(text_files), batch_size), desc="Text batches"):
         if (start + 1) < start_index:
@@ -147,6 +147,7 @@ def process_json_files(
     # # ここにキャッシュファイルを読んで、処理ずみのIDのデータを削除する処理を入れる
     output_path = Path(pipeline.settings.get("output_path", "./output")).expanduser().resolve()
     # cache_file = output_path / ".cache.jsonl"
+    # 改善案：.cache.jsonlにkeyを書籍名、valueに処理ずみのIDのリストを保存する。これを読み込んで、処理ずみのIDはスキップするようにする。
     # cache = []
     # if cache_file.exists():
     #     with cache_file.open("r", encoding="utf-8") as f:
@@ -158,6 +159,16 @@ def process_json_files(
 
     for file_path in json_files:
         entries = load_json_entries(file_path)
+
+        # ここで、キャッシュに基づいて、処理ずみのIDを持つエントリを削除する処理を入れる
+        # 例えば、cacheに{"book_name": [id1, id2, ...]}のようなデータがあるとすると、book_nameに対応するIDのエントリをentriesから削除する処理を入れる。
+        # book_name = get_parent_book_name(file_path)
+        # processed_ids = set()
+        # for cache_entry in cache:
+        #     if cache_entry.get("book_name") == book_name:
+        #         processed_ids.update(cache_entry.get("processed_ids", []))
+        # entries = [entry for entry in entries if entry.get("id") not in processed_ids]
+
         if not entries:
             print(msg_error(f"No entries found in {file_path}."))
             continue
@@ -221,6 +232,9 @@ def main(
         print(msg_error("target_key is required when processing JSON files."), file=sys.stderr)
         sys.exit(1)
 
+    # text_filesとjson_filesを処理する前に、QAPipelineを初期化しておく
+    # ここではjsonlファイルのみの対応（20260403）
+
     pipeline = QAPipeline(settings)
 
     process_text_files(pipeline, text_files, batch_size, start_index)
@@ -260,6 +274,7 @@ if __name__ == "__main__":
         default=0,
         help="Start index for resuming processing",
     )
+
 
     args = parser.parse_args()
 

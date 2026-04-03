@@ -129,3 +129,8 @@ python main_imabarize.py \
 ## ライセンス
 
 `LICENSE` を参照してください。
+
+
+
+
+python3 main_create_imabari_qa.py -p ./yamls/imabari_settings.yaml -s ./test_source/dummy/ -t context

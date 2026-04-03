@@ -181,7 +181,7 @@ class QAPipeline:
         question_prompt = self.prompts.get("question_prompt", None)
         thinking_prompt = self.prompts.get("thinking_prompt", None)
         answer_prompt = self.prompts.get("answer_prompt", None)
-        # refine_question_prompt = self.prompts.get("refine_question_prompt", None)
+        eval_prompt = self.prompts.get("eval_prompt", None)
         # refine_thinking_prompt = self.prompts.get("refine_thinking_prompt", None)
         # refine_answer_prompt = self.prompts.get("refine_answer_prompt", None)
         
@@ -201,6 +201,7 @@ class QAPipeline:
             for text, random_token in zip(texts, random_tokens)
         ]
 
+        print(msg_info(f"now generating QUESTION..."))
         question_texts = [
             self._extract_tag(text, "question")
             for text in self._infer_texts(question_prompts, batch_size)
@@ -209,11 +210,12 @@ class QAPipeline:
         # ==========================================================
         # ここでanswer_textを生成する
         # ==========================================================
-
         answer_prompts = [
             answer_prompt.format(text=text, question=question_text)
             for text, question_text in zip(texts, question_texts)
         ]
+
+        print(msg_info(f"now generating ANSWER..."))
         answer_texts = [
             self._extract_tag(text, "think")
             for text in self._infer_texts(answer_prompts, batch_size)
@@ -227,6 +229,7 @@ class QAPipeline:
             thinking_prompt.format(text=text, question=question_text, answer=answer_text)
             for text, question_text, answer_text in zip(texts, question_texts, answer_texts)
         ]
+        print(msg_info(f"now generating THINKING..."))
         think_texts = [
             self._extract_tag(text, "think")
             for text in self._infer_texts(thinking_prompts, batch_size)
@@ -241,6 +244,22 @@ class QAPipeline:
             for text in think_texts
         ]
 
+        # ==========================================================
+        # ここでevalを行う
+        # ==========================================================
+        eval_prompts = [
+            eval_prompt.format(think=think_text, answer=answer_text)
+            for think_text, answer_text in zip(think_texts, answer_texts)
+        ]
+
+        print(msg_info(f"Eval texts now..."))
+    
+        eval_texts = [
+            self._extract_tag(text, "eval")
+            for text in self._infer_texts(eval_prompts, batch_size)
+        ]
+
+
 
         # ==========================================================
         # データセット化
@@ -248,8 +267,8 @@ class QAPipeline:
 
 
         results = []
-        for question_text, thinking_text, answer_text in zip(
-            question_texts, think_texts, answer_texts
+        for question_text, thinking_text, answer_text, eval_text in zip(
+            question_texts, think_texts, answer_texts, eval_texts
         ):
             if question_text and answer_text:
                 results.append(
@@ -257,6 +276,7 @@ class QAPipeline:
                         "question": question_text,
                         "thinking": thinking_text if thinking_prompt else "",
                         "answer": answer_text,
+                        "eval": eval_text if eval_prompt else "",
                         # "refined_thinking": thinking_text if refine_thinking_prompt else "",
                         # "refined_answer": answer_text if refine_answer_prompt else "",
                         "qa_generator": self.inference_config.get("MODEL_NAME", ""),
