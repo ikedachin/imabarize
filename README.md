@@ -2,9 +2,7 @@
 ![](./imabarize.png)
 画像はnanobananaです
 
-このリポジトリは主に次の2つの処理を提供します。
-
-- `main_imabarize.py`: 標準語の日本語テキストを **今治弁** に変換
+このリポジトリは主に以下の処理を行います。
 - `main_create_imabari_qa.py`: テキストや JSON/JSONL から Q&A データを生成
 
 どちらも OpenAI 互換 API（OpenRouter またはローカルサーバー）を利用し、結果を JSONL 形式で保存します。
@@ -19,7 +17,6 @@
 
 ## リポジトリ構成
 
-- `main_imabarize.py`: 今治弁変換の実行スクリプト
 - `main_create_imabari_qa.py`: Q&A 生成の実行スクリプト
 - `pipelines/imabarize_pipeline.py`: 今治弁変換の推論・保存処理
 - `pipelines/create_qa_model.py`: Q&A 生成の推論処理
@@ -144,22 +141,6 @@ python main_create_imabari_qa.py \
 
 ### 出力（JSONL）
 
-今治弁変換（`main_imabarize.py`）では、次の仕様で保存されます。
-
-- 変換後テキストは `target_key` で指定した同じキー名に上書き
-- `generator` キーにモデル名を付与
-
-例:
-
-```json
-{
-  "book": "sample_book",
-  "page": 1,
-  "context": "これは今治弁に変換された文です。",
-  "generator": "qwen/..."
-}
-```
-
 Q&A 生成（`main_create_imabari_qa.py`）では、`question` / `thinking` / `answer` などのキーを持つ JSONL が出力されます。
 
 ## 再実行時のスキップ仕様
@@ -167,13 +148,8 @@ Q&A 生成（`main_create_imabari_qa.py`）では、`question` / `thinking` / `a
 `main_imabarize.py` は `output_path` 配下の既存 JSONL を読み、`book` と `page` が一致する入力レコードをスキップします。  
 `main_create_imabari_qa.py` はキャッシュファイルを使って `id` 単位で重複処理を避けます。
 
-## 補足
-
-- `docs/README_main_2_imabarize.md` は旧名称（`main_2_sanitization.py`）の記述が残っています。実際の実行スクリプトは `main_imabarize.py` です。
-- `yamls/*.yaml`（`*_format.yaml` を除く）は `.gitignore` で除外されています。
-
 ## ライセンス
-
+Apache License 2.0です。
 `LICENSE` を参照してください。
 
 
