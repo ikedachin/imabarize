@@ -1,16 +1,16 @@
 # ------------------------------------
 # OpenRouter settings
 # ------------------------------------
-openrouter: True
-openrouter_api_key: "<YOUR_OPENROUTER_API_KEY>"
+openrouter: True # OpenRouterを使用するかどうか / Falseの場合はローカルサーバーを使用
+openrouter_api_key: "api_key"
 openrouter_server_url: "https://openrouter.ai/api/v1"
-openrouter_model_name: "qwen/qwen3-30b-a3b-thinking-2507"
+openrouter_model_name: "qwen/qwen3.5-27b" # thinkingモデルを使うこと
 
 # ------------------------------------
 # Local server settings
 # ------------------------------------
-SERVER_URL: "http://localhost:8000/v1"
-MODEL_NAME: "<PATH_OR_MODEL_ID>"
+SERVER_URL: "http://<server_ip>:<server_port>/v1"
+MODEL_NAME: "Qwen3-30B-A3B-Instruct-2507"
 
 # ------------------------------------
 # Inference config
@@ -25,11 +25,15 @@ batch_size: 8
 # Prompts
 # ------------------------------------
 prompts: # 処理の順に並べること
-  - imabarize_prompt: ./prompts/timabarize.md
+  - question_prompt: ./prompts/create_qa/qa_create_question.md
+  - thinking_prompt: ./prompts/create_qa/qa_create_thinking.md
+  - answer_prompt: ./prompts/create_qa/qa_create_answer.md
+  - refine_answer_prompt: ./prompts/create_qa/qa_refine_answer.md
+  - eval_prompt: ./prompts/create_qa/eval.md
 # ------------------------------------
 # Output
 # ------------------------------------
-output_path: ./test_output/sanitization_test
+output_path: ./test_output/imabari_qa
 
 # ------------------------------------
 # Retry settings
