@@ -2,6 +2,10 @@
 ![](./imabarize.png)
 画像はnanobananaです
 
+※このリポジトリは`https://github.com/foxn2000/sdg`にインスパイアされたレポジトリです。sdgレポジトリはさらに進化し、`foxn2000
+sdg_loom`に進化しています。こちらも是非ともご覧ください。
+
+
 このリポジトリは主に以下の処理を行います。
 - `main_create_imabari_qa.py`: テキストや JSON/JSONL から Q&A データを生成
 
