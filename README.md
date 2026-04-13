@@ -113,7 +113,18 @@ python main_imabarize.py \
 例:
 
 ```json
-{"book":"sample_book","page":1,"context":"これは今治弁に変換された文...","generator":"qwen/..."}
+{
+  "book":"sample_book",
+  "page":1,
+  "question":"標準語の質問文",
+  "thinking": "これは今治弁で表現された思考過程",
+  "answer": "今治弁の回答",
+  "messages": [
+    {"role": "user", "content": "標準語の質問文"}
+    {"role": "assistant", "content": "<think>今治弁の思考過程</think>今治弁の回答}
+  ],
+  "generator":"qwen/..."
+}
 ```
 
 ## 再実行時のスキップ仕様
