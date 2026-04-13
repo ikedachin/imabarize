@@ -1,23 +1,29 @@
-# Imabarize Pipeline
+# Imabarize Repository
 
-標準語の日本語テキストを **今治弁** に変換するためのバッチ処理リポジトリです。  
-`main_imabarize.py` がエントリポイントで、JSON / JSONL を読み込み、OpenAI互換API（OpenRouter またはローカルサーバー）経由で変換結果を JSONL で保存します。
+このリポジトリは主に次の2つの処理を提供します。
 
-## 機能
+- `main_imabarize.py`: 標準語の日本語テキストを **今治弁** に変換
+- `main_create_imabari_qa.py`: テキストや JSON/JSONL から Q&A データを生成
 
-- JSON / JSONL の一括読み込み
-- `target_key` 指定による変換対象キーの切り替え
-- 複数キー同時処理（`target_key: "text,context"` のようにカンマ区切り）
+どちらも OpenAI 互換 API（OpenRouter またはローカルサーバー）を利用し、結果を JSONL 形式で保存します。
+
+## 主な機能
+
+- JSON / JSONL / テキスト入力のバッチ処理
+- `target_key` 指定による対象キーの切り替え
 - バッチ推論（`batch_size`）
-- 既処理データのスキップ（`book` + `page` 単位）
-- OpenRouter / ローカル OpenAI互換API の切り替え
+- 既処理データのスキップ（`book` + `page` または `id` キャッシュ）
+- OpenRouter / ローカル OpenAI 互換 API の切り替え
 
 ## リポジトリ構成
 
-- `main_imabarize.py`: 実行スクリプト
-- `pipelines/imabarize_pipeline.py`: 推論・保存処理
+- `main_imabarize.py`: 今治弁変換の実行スクリプト
+- `main_create_imabari_qa.py`: Q&A 生成の実行スクリプト
+- `pipelines/imabarize_pipeline.py`: 今治弁変換の推論・保存処理
+- `pipelines/create_qa_model.py`: Q&A 生成の推論処理
 - `prompts/imabarize.md`: 今治弁変換プロンプト
-- `yamls/imabari_settings_format.yaml`: 設定テンプレート
+- `prompts/create_qa/`: Q&A 生成プロンプト群
+- `yamls/imabari_settings_format.yaml`: Q&A 生成向け設定テンプレート
 - `test_source/`: 入力サンプル
 - `test_output/`: 出力先サンプル
 
@@ -44,24 +50,36 @@ pip install -r requirements.txt
 
 ## 実行方法
 
+### A. 今治弁変換（`main_imabarize.py`）
+
 ### 1) 設定ファイルを用意
 
-テンプレートをコピーして編集:
+`main_imabarize.py` には `imabarize_prompt` を含む設定が必要です。
+現在の `yamls/imabari_settings_format.yaml` は Q&A 生成向けのため、今治弁変換ではそのまま利用できません。
 
-```bash
-cp yamls/imabari_settings_format.yaml yamls/imabari_settings.yaml
+例: `yamls/imabarize_only.yaml`
+
+```yaml
+openrouter: true
+openrouter_api_key: "YOUR_API_KEY"
+openrouter_server_url: "https://openrouter.ai/api/v1"
+openrouter_model_name: "qwen/qwen3.5-27b"
+
+SERVER_URL: "http://localhost:8000/v1"
+MODEL_NAME: "Qwen3-30B-A3B-Instruct-2507"
+
+infer_config:
+  max_tokens: 4096
+  temperature: 0
+  top_p: 1.0
+
+batch_size: 8
+prompts:
+  - imabarize_prompt: ./prompts/imabarize.md
+output_path: ./test_output/imabarized
+max_retries: 3
+wait_seconds: 5
 ```
-
-最低限の確認項目:
-
-- `openrouter: true` の場合: `openrouter_api_key`, `openrouter_model_name`
-- `openrouter: false` の場合: `SERVER_URL`, `MODEL_NAME`
-- `output_path`: 出力先
-- `prompts`: プロンプトファイル
-
-注意:
-
-- テンプレートの `prompts` が `./prompts/timabarize.md` になっている場合は、実在する `./prompts/imabarize.md` に修正してください。
 
 ### 2) 実行
 
@@ -70,7 +88,7 @@ cp yamls/imabari_settings_format.yaml yamls/imabari_settings.yaml
 ```bash
 python main_imabarize.py \
   -s ./test_source/dummy \
-  -p ./yamls/imabari_settings.yaml \
+  -p ./yamls/imabarize_only.yaml \
   -t context \
   -e jsonl
 ```
@@ -80,7 +98,7 @@ python main_imabarize.py \
 ```bash
 python main_imabarize.py \
   -s ./test_source/dummy/dummy.jsonl \
-  -p ./yamls/imabari_settings.yaml \
+  -p ./yamls/imabarize_only.yaml \
   -t context
 ```
 
@@ -90,7 +108,24 @@ python main_imabarize.py \
 - `-p, --settings_path`: YAML設定ファイル
 - `-t, --target_key`: 変換対象キー（未指定時は `text`）
 - `-e, --extensions`: 対象拡張子（例: `json,jsonl`）
-- `-i, --start_index`: 開始インデックス（現状は設定反映のみ）
+- `-i, --start_index`: 将来の再開処理向け引数（現状は実処理には未反映）
+
+### B. Q&A 生成（`main_create_imabari_qa.py`）
+
+設定テンプレートをコピーして編集:
+
+```bash
+cp yamls/imabari_settings_format.yaml yamls/imabari_settings.yaml
+```
+
+実行例:
+
+```bash
+python main_create_imabari_qa.py \
+  -s ./test_source/JaQuAD_jsonls/validation.jsonl \
+  -p ./yamls/imabari_settings.yaml \
+  -t context
+```
 
 ## 入出力フォーマット
 
@@ -107,35 +142,33 @@ python main_imabarize.py \
 
 ### 出力（JSONL）
 
-- 変換後テキストは **同じキー名** に上書きされます
-- `generator` キーにモデル名を付与します
+今治弁変換（`main_imabarize.py`）では、次の仕様で保存されます。
+
+- 変換後テキストは `target_key` で指定した同じキー名に上書き
+- `generator` キーにモデル名を付与
 
 例:
 
 ```json
 {
-  "book":"sample_book",
-  "page":1,
-  "question":"標準語の質問文",
-  "thinking": "これは今治弁で表現された思考過程",
-  "answer": "今治弁の回答",
-  "messages": [
-    {"role": "user", "content": "標準語の質問文"}
-    {"role": "assistant", "content": "<think>今治弁の思考過程</think>今治弁の回答}
-  ],
-  "generator":"qwen/..."
+  "book": "sample_book",
+  "page": 1,
+  "context": "これは今治弁に変換された文です。",
+  "generator": "qwen/..."
 }
 ```
 
+Q&A 生成（`main_create_imabari_qa.py`）では、`question` / `thinking` / `answer` などのキーを持つ JSONL が出力されます。
+
 ## 再実行時のスキップ仕様
 
-`output_path` 配下の既存 JSONL を読み、`book` と `page` が一致する入力レコードは再処理をスキップします。  
-同一データに対する重複推論を避ける用途です。
+`main_imabarize.py` は `output_path` 配下の既存 JSONL を読み、`book` と `page` が一致する入力レコードをスキップします。  
+`main_create_imabari_qa.py` はキャッシュファイルを使って `id` 単位で重複処理を避けます。
 
 ## 補足
 
 - `docs/README_main_2_imabarize.md` は旧名称（`main_2_sanitization.py`）の記述が残っています。実際の実行スクリプトは `main_imabarize.py` です。
-- 本リポジトリには APIキーを含む `yamls/*.yaml` はコミットしない設定（`.gitignore`）が入っています。
+- `yamls/*.yaml`（`*_format.yaml` を除く）は `.gitignore` で除外されています。
 
 ## ライセンス
 
