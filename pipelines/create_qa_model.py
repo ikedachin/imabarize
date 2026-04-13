@@ -29,6 +29,7 @@ class QAPipeline:
             self.client = OpenAI(
                 base_url=self.inference_config.get("SERVER_URL"),
                 api_key=self.inference_config.get("API_KEY"),
+                timeout=self.inference_config.get("timeout", 600),
             )
             self.runtime_label = "openrouter"
         else:
@@ -43,9 +44,11 @@ class QAPipeline:
                     "MODEL_NAME": model_name,
                 }
             )
+            # print(msg_debug(f"Using local inference server at {server_url} with model {model_name} and timeout {self.inference_config.get('timeout', 600)} seconds"))
             self.client = OpenAI(
                 base_url=self.inference_config.get("SERVER_URL"),
                 api_key=self.inference_config.get("API_KEY"),
+                timeout=self.inference_config.get("timeout", 600),
             )
 
         self.output_dir = (
@@ -280,6 +283,16 @@ class QAPipeline:
                         # "refined_thinking": thinking_text if refine_thinking_prompt else "",
                         # "refined_answer": answer_text if refine_answer_prompt else "",
                         "qa_generator": self.inference_config.get("MODEL_NAME", ""),
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": question_text,
+                            },
+                            {
+                                "role": "assistant",
+                                "content": f"<think>{thinking_text}</think>\n\n{answer_text}",
+                            },
+                        ],
                     }
                 )
             else:
@@ -300,8 +313,9 @@ class QAPipeline:
                 json.dump(result, f, ensure_ascii=False)
                 f.write("\n")
 
-    def add_cache(self, entry_id: str) -> None:
+    def add_cache(self, entry_id: str, cache_name: str) -> None:
         # キャッシュ用のIDをファイルに保存するなどの実装をここに追加
-        save_path = self.output_dir / "cache_ids.txt"
+        save_path = self.output_dir / f"cache_{cache_name}.txt"
+        save_path.parent.mkdir(parents=True, exist_ok=True)
         with open(save_path, "a", encoding="utf-8") as f:
             f.write(f"{entry_id}\n")

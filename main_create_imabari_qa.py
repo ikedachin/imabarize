@@ -146,28 +146,25 @@ def process_json_files(
 
     # # ここにキャッシュファイルを読んで、処理ずみのIDのデータを削除する処理を入れる
     output_path = Path(pipeline.settings.get("output_path", "./output")).expanduser().resolve()
-    # cache_file = output_path / ".cache.jsonl"
-    # 改善案：.cache.jsonlにkeyを書籍名、valueに処理ずみのIDのリストを保存する。これを読み込んで、処理ずみのIDはスキップするようにする。
-    # cache = []
-    # if cache_file.exists():
-    #     with cache_file.open("r", encoding="utf-8") as f:
-    #         for line in f:
-    #             line = line.strip()
-    #             if not line:
-    #                 continue
-    #             cache.append(json.loads(line))
+    output_path.mkdir(parents=True, exist_ok=True)
 
     for file_path in json_files:
         entries = load_json_entries(file_path)
 
         # ここで、キャッシュに基づいて、処理ずみのIDを持つエントリを削除する処理を入れる
         # 例えば、cacheに{"book_name": [id1, id2, ...]}のようなデータがあるとすると、book_nameに対応するIDのエントリをentriesから削除する処理を入れる。
-        # book_name = get_parent_book_name(file_path)
-        # processed_ids = set()
-        # for cache_entry in cache:
-        #     if cache_entry.get("book_name") == book_name:
-        #         processed_ids.update(cache_entry.get("processed_ids", []))
-        # entries = [entry for entry in entries if entry.get("id") not in processed_ids]
+        book_name = get_parent_book_name(file_path)
+        cache_file = output_path / f"cache_{book_name}_{file_path.stem}.txt"
+
+        if cache_file.exists():
+            with open(cache_file, "r", encoding="utf-8") as f:
+                processed_ids = set(line.strip() for line in f if line.strip())
+                print(msg_info(f"Loaded {len(processed_ids)} processed IDs from cache for {file_path.name}."))
+        else:
+            processed_ids = set()
+        print(msg_info(f"Before filtering, {len(entries)} entries in {file_path.name}."))
+        entries = [entry for entry in entries if entry.get("id") not in processed_ids]
+        print(msg_info(f"After filtering, {len(entries)} entries to process in {file_path.name}."))
 
         if not entries:
             print(msg_error(f"No entries found in {file_path}."))
@@ -200,7 +197,7 @@ def process_json_files(
                 result["source_files"] = [str(file_path.name)]
                 result["id"] = entry_id
                 pipeline.append_jsonl(output_jsonl, result)
-                pipeline.add_cache(entry_id)
+                pipeline.add_cache(entry_id, f"{book_name}_{file_path.stem}")
 
         print(msg_info(f"Saved QA to: {output_jsonl}"))
 
