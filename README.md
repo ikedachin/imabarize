@@ -1,5 +1,7 @@
 # Imabarize Repository
 ![](./imabarize.png)
+画像はnanobananaです
+
 このリポジトリは主に次の2つの処理を提供します。
 
 - `main_imabarize.py`: 標準語の日本語テキストを **今治弁** に変換
