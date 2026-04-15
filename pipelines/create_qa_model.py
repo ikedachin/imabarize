@@ -114,7 +114,7 @@ class QAPipeline:
         return f"{first_text}\n\n{second_text}", [index, index + 1] if second_item else [index]
 
     def _infer_text(self, prompt: str) -> str:
-        content = [{"type": "text", "text": prompt}]
+        user_content = [{"type": "text", "text": prompt}]
 
         max_tokens = int(self.inference_config.get("max_tokens", 2048))
         temperature = self.inference_config.get("temperature", 0)
@@ -125,17 +125,47 @@ class QAPipeline:
             try:
                 response = self.client.chat.completions.create(
                     model=self.inference_config.get("MODEL_NAME"),
-                    messages=[{"role": "user", "content": content}],
+                    messages=[{"role": "user", "content": user_content}],
                     max_tokens=max_tokens,
                     temperature=temperature,
                     top_p=top_p,
                 )
-                content = response.choices[0].message.content
-                if content is None:
-                    return ""
-                if isinstance(content, str):
-                    return content.strip()
-                return str(content).strip()
+                response_content = response.choices[0].message.content
+                print(msg_debug(f"Model response (raw): {response_content[:100]}..."))
+
+
+                if response_content is None:
+                    last_exc = RuntimeError("Model returned empty content (None).")
+                    if i < self.max_retries - 1:
+                        sleep = min((self.wait_seconds * (2 ** i)) + random.random() * 0.2, 10.0)
+                        time.sleep(sleep)
+                        continue
+                    break
+
+                if isinstance(response_content, str):
+                    normalized = response_content.strip()
+                elif isinstance(response_content, list):
+                    text_parts: List[str] = []
+                    for part in response_content:
+                        if isinstance(part, dict):
+                            value = part.get("text")
+                            if value:
+                                text_parts.append(str(value))
+                        else:
+                            text_parts.append(str(part))
+                    normalized = "".join(text_parts).strip()
+                else:
+                    normalized = str(response_content).strip()
+
+                if normalized:
+                    return normalized
+                last_exc = RuntimeError("Model returned blank text.")
+                if i < self.max_retries - 1:
+                    sleep = min((self.wait_seconds * (2 ** i)) + random.random() * 0.2, 10.0)
+                    time.sleep(sleep)
+                    print(msg_debug(f"Retrying due to blank response. Attempt {i + 1}/{self.max_retries}."))
+                    continue
+                # break
 
             except Exception as e:
                 last_exc = e
@@ -144,12 +174,12 @@ class QAPipeline:
                 if isinstance(e, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError)):
                     sleep = min((self.wait_seconds * (2 ** i)) + random.random() * 0.2, 10.0)
                     time.sleep(sleep)
+                    print(msg_debug(f"Retrying due to network error. Attempt {i + 1}/{self.max_retries}."))
                     continue
             if i == self.max_retries - 1:
                 print(msg_error(f"Inference failed after {self.max_retries} attempts. last_error={last_exc}"))
-                # raise  # その他は即死
+                return ""
 
-        # raise RuntimeError(f"Inference retry exhausted. last_error={last_exc}")
         return ""
 
 
@@ -168,6 +198,8 @@ class QAPipeline:
         text = str(text)
         start_tag = f"<{tag}>"
         end_tag = f"</{tag}>"
+        # if tag == "answer":
+        #     text = text.split("</think>")[-1]
         if (start_tag in text) and (end_tag in text):
             text = text.split(start_tag)[-1]
             text = text.split(end_tag)[0]
@@ -175,6 +207,7 @@ class QAPipeline:
             text = text.split(start_tag)[-1]
         elif end_tag in text:
             text = text.split(end_tag)[0]
+        # print(msg_debug(f"Extracted text for tag '{tag}': \n{text[:100]}..."))
         return text.strip()
 
     def create_qa_batch(self, texts: List[str], batch_size: int) -> List[Dict[str, str]]:
@@ -205,10 +238,14 @@ class QAPipeline:
         ]
 
         print(msg_info(f"now generating QUESTION..."))
-        question_texts = [
-            self._extract_tag(text, "question")
-            for text in self._infer_texts(question_prompts, batch_size)
-        ]
+        raw_question_texts = self._infer_texts(question_prompts, batch_size)
+
+        # print(msg_debug(f"Raw question texts: \n{raw_question_texts}"))
+
+        question_texts = [self._extract_tag(text, "question") for text in raw_question_texts]
+
+        # print(msg_debug(f"Question texts: \n{question_texts}"))
+
 
         # ==========================================================
         # ここでanswer_textを生成する
@@ -219,10 +256,17 @@ class QAPipeline:
         ]
 
         print(msg_info(f"now generating ANSWER..."))
-        answer_texts = [
-            self._extract_tag(text, "think")
-            for text in self._infer_texts(answer_prompts, batch_size)
-        ]
+        # print(msg_debug(f"Answer prompts: \n{answer_prompts}"))
+
+        # for idx, prompt in enumerate(answer_prompts):
+        #     print(msg_debug(f"Prompt {idx + 1}/{len(answer_prompts)}: {prompt[:200]}..."))
+        # ここまではOK
+
+        raw_answer_texts = self._infer_texts(answer_prompts, batch_size)
+        print(msg_debug(f"Raw answer texts: \n{raw_answer_texts}"))
+        answer_texts = [self._extract_tag(text, "answer") for text in raw_answer_texts]
+
+        print(msg_debug(f"Answer texts: \n{answer_texts}"))
 
         # ==========================================================
         # ここでthinking_textを生成する
@@ -232,20 +276,13 @@ class QAPipeline:
             thinking_prompt.format(text=text, question=question_text, answer=answer_text)
             for text, question_text, answer_text in zip(texts, question_texts, answer_texts)
         ]
-        print(msg_info(f"now generating THINKING..."))
-        think_texts = [
-            self._extract_tag(text, "think")
-            for text in self._infer_texts(thinking_prompts, batch_size)
-        ]
 
-        think_texts = [
-            self._extract_tag(text, "think")
-            for text in think_texts
-        ]
-        think_texts = [
-            self._extract_tag(text, "thinking")
-            for text in think_texts
-        ]
+        print(msg_info(f"now generating THINKING..."))
+
+        raw_think_texts = self._infer_texts(thinking_prompts, batch_size)
+        print(msg_debug(f"Raw thinking texts: \n{raw_think_texts}"))
+        think_texts = [self._extract_tag(text, "think") for text in raw_think_texts]
+        print(msg_debug(f"Thinking texts: \n{think_texts}"))
 
         # ==========================================================
         # ここでevalを行う
@@ -256,11 +293,11 @@ class QAPipeline:
         ]
 
         print(msg_info(f"Eval texts now..."))
-    
-        eval_texts = [
-            self._extract_tag(text, "eval")
-            for text in self._infer_texts(eval_prompts, batch_size)
-        ]
+
+        raw_eval = self._infer_texts(eval_prompts, batch_size)
+        print(msg_debug(f"Raw eval texts: \n{raw_eval}"))
+        eval_texts = [self._extract_tag(text, "eval") for text in raw_eval]
+        print(msg_debug(f"Eval texts: \n{eval_texts}"))
 
 
 
@@ -312,6 +349,8 @@ class QAPipeline:
             with open(save_path, "a", encoding="utf-8") as f:
                 json.dump(result, f, ensure_ascii=False)
                 f.write("\n")
+        else:
+            print(msg_debug(f"Skipped saving due to empty fields. result={result}"))
 
     def add_cache(self, entry_id: str, cache_name: str) -> None:
         # キャッシュ用のIDをファイルに保存するなどの実装をここに追加

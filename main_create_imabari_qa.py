@@ -193,6 +193,9 @@ def process_json_files(
                 continue
 
             results = pipeline.create_qa_batch(batch_texts, batch_size=batch_size)
+            
+            print(msg_debug(f"Batch results for {results}"))
+            
             for result, entry_id in zip(results, ids):
                 result["source_files"] = [str(file_path.name)]
                 result["id"] = entry_id
