@@ -5,6 +5,7 @@ uv.lock
 # pycache
 __pycache__/
 *.pyc
+*/.DS_Store
 
 # yamls with secrets
 /yamls/*.yaml

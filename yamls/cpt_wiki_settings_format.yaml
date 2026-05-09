@@ -53,8 +53,8 @@ deduplicate: true
 copyright_mitigation: true
 keep_intermediate: false
 prompts:
-  - to_bullet_points_prompt: ./prompts/create_cpt_set/to_bullet_points.txt
-  - bullet_points_to_text_prompt: ./prompts/create_cpt_set/bullet_points_to_text.txt
+  - to_bullet_points_prompt: ./prompts/create_cpt/to_bullet_points.txt
+  - bullet_points_to_text_prompt: ./prompts/create_cpt/bullet_points_to_text.txt
 
 # ------------------------------------
 # Output
