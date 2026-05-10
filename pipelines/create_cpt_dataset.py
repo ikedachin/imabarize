@@ -138,8 +138,11 @@ class CPTDatasetPipeline:
             )
             print(msg_info(f"Saved CPT batch status. output_chunks={len(batch_chunks)}"))
             self._append_jsonl_records(all_chunks_path, batch_chunks)
-            self._append_processed_ids(cache_path, [entry_id])
-            chunks.extend(batch_chunks)
+            if batch_chunks:
+                self._append_processed_ids(cache_path, [entry_id])
+                chunks.extend(batch_chunks)
+            else:
+                print(msg_info(f"Skipped cache for id={entry_id} because no chunks were generated."))
 
         return chunks
 

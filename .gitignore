@@ -16,7 +16,9 @@ __pycache__/
 # data 
 test_source/JaQuAD_jsonls/*
 test_source/wiki/*
-test_source/.gitkeep
+!test_source/.gitkeep
+!test_source/wiki/.gitkeep
 
 test_output/*
 test_output/imabari_qa/*
+
