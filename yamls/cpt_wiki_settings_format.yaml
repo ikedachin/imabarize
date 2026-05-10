@@ -1,0 +1,68 @@
+# ------------------------------------
+# OpenRouter settings
+# ------------------------------------
+openrouter: true # OpenRouterを使用するかどうか / falseの場合はローカルサーバーを使用
+openrouter_api_key: "api_key"
+openrouter_server_url: "https://openrouter.ai/api/v1"
+openrouter_model_name: "qwen/qwen3.5-27b"
+
+# ------------------------------------
+# Local server settings
+# ------------------------------------
+SERVER_URL: "http://<server_ip>:<server_port>/v1"
+MODEL_NAME: "Qwen3-30B-A3B-Instruct-2507"
+
+# ------------------------------------
+# Inference config
+# ------------------------------------
+infer_config:
+  max_tokens: 4096
+  temperature: 0
+  top_p: 1.0
+  timeout: 600
+batch_size: 8
+
+# ------------------------------------
+# CPT dataset settings
+# ------------------------------------
+target_key: content
+title_key: title
+id_key: id
+text_key: text
+
+# title を本文の先頭に付けて、記事名の情報を残す
+include_title: true
+
+# 文字数ベースでチャンク化する。
+# tokenizer 非依存で作るため、日本語 Wikipedia の段落境界を優先して分割する。
+min_chars: 128
+max_chars: 4096
+overlap_chars: 256
+
+# ------------------------------------
+# Split settings
+# ------------------------------------
+train_ratio: 0.98
+shuffle: true
+seed: 42
+deduplicate: true
+
+# ------------------------------------
+# Copyright mitigation settings
+# ------------------------------------
+copyright_mitigation: true
+keep_intermediate: false
+prompts:
+  - to_bullet_points_prompt: ./prompts/create_cpt/to_bullet_points.txt
+  - bullet_points_to_text_prompt: ./prompts/create_cpt/bullet_points_to_text.txt
+
+# ------------------------------------
+# Output
+# ------------------------------------
+output_path: ./test_output/cpt/wiki
+
+# ------------------------------------
+# Retry settings
+# ------------------------------------
+max_retries: 3
+wait_seconds: 5

@@ -5,6 +5,7 @@ uv.lock
 # pycache
 __pycache__/
 *.pyc
+*/.DS_Store
 
 # yamls with secrets
 /yamls/*.yaml
@@ -14,7 +15,10 @@ __pycache__/
 
 # data 
 test_source/JaQuAD_jsonls/*
-test_source/.gitkeep
+test_source/wiki/*
+!test_source/.gitkeep
+!test_source/wiki/.gitkeep
 
 test_output/*
 test_output/imabari_qa/*
+
