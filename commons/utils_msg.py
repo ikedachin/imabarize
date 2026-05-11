@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+from datetime import datetime
 
 # ==============================
 # カラー装飾用の定数
@@ -16,14 +17,18 @@ class Colors:
     GRAY = '\033[90m' # Gray text
 
 def msg_info(msg):
-    return f"{Colors.BLUE}{Colors.BOLD}💡 [INFO]{Colors.RESET} {Colors.CYAN}{msg}{Colors.RESET}"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"{Colors.BLUE}{Colors.BOLD}💡 [INFO]{Colors.RESET} {timestamp} {Colors.CYAN}{msg}{Colors.RESET}"
 
 def msg_error(msg):
-    return f"{Colors.RED}{Colors.BOLD}❌ [ERROR]{Colors.RESET} {Colors.RED}{msg}{Colors.RESET}"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"{Colors.RED}{Colors.BOLD}❌ [ERROR]{Colors.RESET} {timestamp} {Colors.RED}{msg}{Colors.RESET}"
 
 def msg_debug(msg):
-    return f"{Colors.YELLOW}🔍 [DEBUG]{Colors.RESET} {Colors.GRAY}{msg}{Colors.RESET}"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"{Colors.YELLOW}🔍 [DEBUG]{Colors.RESET} {timestamp} {Colors.GRAY}{msg}{Colors.RESET}"
 
 def msg_success(msg):
-    return f"{Colors.GREEN}{Colors.BOLD}✅ [SUCCESS]{Colors.RESET} {Colors.GREEN}{msg}{Colors.RESET}"
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    return f"{Colors.GREEN}{Colors.BOLD}✅ [SUCCESS]{Colors.RESET} {timestamp} {Colors.GREEN}{msg}{Colors.RESET}"
 
