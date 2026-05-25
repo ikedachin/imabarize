@@ -153,7 +153,7 @@ class CPTDatasetPipeline:
             # Update per-entry tracking
             for candidate in batch:
                 eid = candidate["_entry_id"]
-                entry_processed_counts[eid] = entry_processed_counts.get(eid, 0) + 1
+                entry_processed_counts[eid] += 1
             for chunk in batch_chunks:
                 entries_with_output.add(chunk["_entry_id"])
 
@@ -161,7 +161,7 @@ class CPTDatasetPipeline:
             newly_cached: List[str] = [
                 eid
                 for eid in entry_processed_counts
-                if entry_processed_counts[eid] >= entry_candidate_counts.get(eid, 0)
+                if entry_processed_counts[eid] >= entry_candidate_counts[eid]
                 and eid in entries_with_output
                 and eid not in already_cached
             ]
