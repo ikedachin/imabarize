@@ -116,33 +116,165 @@ class CPTDatasetPipeline:
         batch_status_path.touch(exist_ok=True)
         processed_ids = self._load_processed_ids(cache_path)
 
-        if processed_ids and all_chunks_path.exists():
+        if processed_ids:
             print(msg_info(f"Loaded {len(processed_ids)} processed IDs from cache."))
 
         chunks = self._load_jsonl_records(all_chunks_path) if all_chunks_path.exists() else []
         pending_entries = [entry for entry in entries if self._entry_cache_id(entry) not in processed_ids]
 
-        for index, entry in enumerate(pending_entries, start=1):
-            entry_id = self._entry_cache_id(entry)
-            print(msg_info(f"CPT row {index} / {len(pending_entries)} id={entry_id}"))
+        # Stage 1: pre-chunk all pending entries without any LLM calls
+        print(msg_info(f"Pre-chunking {len(pending_entries)} pending entries..."))
+        chunk_candidates = self._prepare_chunk_candidates(pending_entries)
+        print(msg_info(f"Prepared {len(chunk_candidates)} chunk candidates."))
 
-            batch_chunks = self._build_chunks([entry])
+        if not chunk_candidates:
+            return chunks
+
+        # Count how many candidates each entry contributed so we know when it is done
+        entry_candidate_counts: Dict[str, int] = {}
+        for candidate in chunk_candidates:
+            eid = candidate["_entry_id"]
+            entry_candidate_counts[eid] = entry_candidate_counts.get(eid, 0) + 1
+
+        entry_processed_counts: Dict[str, int] = {eid: 0 for eid in entry_candidate_counts}
+        entries_with_output: set[str] = set()
+        already_cached: set[str] = set()
+
+        total = len(chunk_candidates)
+        num_batches = (total + self.batch_size - 1) // self.batch_size
+
+        # Stage 2: run LLM inference in batches of batch_size across all candidates
+        for batch_num, batch_start in enumerate(range(0, total, self.batch_size), start=1):
+            batch = chunk_candidates[batch_start : batch_start + self.batch_size]
+            print(msg_info(f"CPT batch {batch_num} / {num_batches} candidates={len(batch)}"))
+
+            batch_chunks = self._finalize_chunk_candidates(batch)
+
+            # Update per-entry tracking
+            for candidate in batch:
+                eid = candidate["_entry_id"]
+                entry_processed_counts[eid] = entry_processed_counts.get(eid, 0) + 1
+            for chunk in batch_chunks:
+                entries_with_output.add(chunk["_entry_id"])
+
+            # Entries whose last candidate was in this batch and produced ≥1 chunk
+            newly_cached: List[str] = [
+                eid
+                for eid in entry_processed_counts
+                if entry_processed_counts[eid] >= entry_candidate_counts.get(eid, 0)
+                and eid in entries_with_output
+                and eid not in already_cached
+            ]
+
+            # Strip internal fields before persisting
+            save_chunks = [{k: v for k, v in c.items() if not k.startswith("_")} for c in batch_chunks]
+
+            self._append_jsonl_records(all_chunks_path, save_chunks)
             self._append_jsonl_record(
                 batch_status_path,
                 {
-                    "row": index,
-                    "input_records": 1,
-                    "output_chunks": len(batch_chunks),
-                    "cached_ids": [entry_id],
+                    "batch": batch_num,
+                    "input_records": len(batch),
+                    "output_chunks": len(save_chunks),
+                    "cached_ids": newly_cached,
                 },
             )
-            print(msg_info(f"Saved CPT batch status. output_chunks={len(batch_chunks)}"))
-            self._append_jsonl_records(all_chunks_path, batch_chunks)
-            if batch_chunks:
-                self._append_processed_ids(cache_path, [entry_id])
-                chunks.extend(batch_chunks)
-            else:
-                print(msg_info(f"Skipped cache for id={entry_id} because no chunks were generated."))
+            print(msg_info(f"Saved CPT batch status. output_chunks={len(save_chunks)}"))
+
+            if newly_cached:
+                self._append_processed_ids(cache_path, newly_cached)
+                already_cached.update(newly_cached)
+
+            chunks.extend(save_chunks)
+
+        # Log entries whose candidates were all processed but produced no output
+        for eid in entry_candidate_counts:
+            if eid not in entries_with_output:
+                print(msg_info(f"Skipped cache for id={eid} because no chunks were generated."))
+
+        return chunks
+
+    def _prepare_chunk_candidates(self, entries: List[Dict]) -> List[Dict]:
+        """Stage 1: normalise text and split every entry into chunk candidates.
+
+        No LLM calls are made here.  Returns a flat list of candidate dicts
+        with internal keys prefixed by ``_`` (``_entry_id``, ``_entry``,
+        ``_title``, ``_chunk_index``, ``_original_text``).
+        """
+        candidates: List[Dict] = []
+        for entry in entries:
+            entry_id = self._entry_cache_id(entry)
+            text = entry.get(self.target_key)
+            if not isinstance(text, str):
+                continue
+
+            normalized = self._normalize_text(text)
+            if not normalized or len(normalized) < self.min_chars:
+                continue
+
+            title = str(entry.get(self.title_key, "")).strip()
+            if self.include_title and title:
+                normalized = f"{title}\n\n{normalized}"
+
+            for chunk_index, chunk_text in enumerate(self._split_text(normalized)):
+                candidates.append(
+                    {
+                        "_entry_id": entry_id,
+                        "_entry": entry,
+                        "_title": title,
+                        "_chunk_index": chunk_index,
+                        "_original_text": chunk_text,
+                    }
+                )
+        return candidates
+
+    def _finalize_chunk_candidates(self, candidates: List[Dict]) -> List[Dict]:
+        """Stage 2: run LLM reconstruction (if enabled) and assemble chunk dicts.
+
+        Each returned dict contains the public chunk fields plus a temporary
+        ``_entry_id`` field used by the caller for cache tracking.  Callers
+        must strip keys starting with ``_`` before persisting to disk.
+        """
+        if not candidates:
+            return []
+
+        original_texts = [c["_original_text"] for c in candidates]
+
+        if self.copyright_mitigation:
+            reconstructed = self._reconstruct_texts(original_texts)
+        else:
+            reconstructed = [(text, "", text) for text in original_texts]
+
+        seen_texts: set[str] = set()
+        chunks: List[Dict] = []
+        for candidate, (chunk_text, bullet_text, original_text) in zip(candidates, reconstructed):
+            if len(chunk_text) < self.min_chars:
+                continue
+            if self.deduplicate:
+                if chunk_text in seen_texts:
+                    continue
+                seen_texts.add(chunk_text)
+
+            entry = candidate["_entry"]
+            title = candidate["_title"]
+            chunk_index = candidate["_chunk_index"]
+            entry_id = candidate["_entry_id"]
+
+            chunk: Dict = {
+                self.text_key: chunk_text,
+                "id": str(entry.get(self.id_key, "")),
+                "title": title,
+                "source_file": str(entry.get("source_file", "")),
+                "chunk_index": chunk_index,
+                "copyright_mitigation": self.copyright_mitigation,
+                "_entry_id": entry_id,
+            }
+            if self.copyright_mitigation:
+                chunk["cpt_generator"] = self.inference_config.get("MODEL_NAME", "")
+            if self.keep_intermediate:
+                chunk["bullet_points"] = bullet_text
+                chunk["original_text"] = original_text
+            chunks.append(chunk)
 
         return chunks
 
@@ -347,52 +479,10 @@ class CPTDatasetPipeline:
             f.write("\n")
 
     def _build_chunks(self, entries: List[Dict]) -> List[Dict]:
-        chunks: List[Dict] = []
-        seen_texts = set()
-
-        for entry in entries:
-            text = entry.get(self.target_key)
-            if not isinstance(text, str):
-                continue
-
-            normalized = self._normalize_text(text)
-            if not normalized or len(normalized) < self.min_chars:
-                continue
-
-            title = str(entry.get(self.title_key, "")).strip()
-            if self.include_title and title:
-                normalized = f"{title}\n\n{normalized}"
-
-            original_chunks = self._split_text(normalized)
-            if self.copyright_mitigation:
-                reconstructed_chunks = self._reconstruct_texts(original_chunks)
-            else:
-                reconstructed_chunks = [(chunk_text, "", chunk_text) for chunk_text in original_chunks]
-
-            for chunk_index, (chunk_text, bullet_text, original_text) in enumerate(reconstructed_chunks):
-                if len(chunk_text) < self.min_chars:
-                    continue
-                if self.deduplicate:
-                    if chunk_text in seen_texts:
-                        continue
-                    seen_texts.add(chunk_text)
-                chunks.append(
-                    {
-                        self.text_key: chunk_text,
-                        "id": str(entry.get(self.id_key, "")),
-                        "title": title,
-                        "source_file": str(entry.get("source_file", "")),
-                        "chunk_index": chunk_index,
-                        "copyright_mitigation": self.copyright_mitigation,
-                    }
-                )
-                if self.copyright_mitigation:
-                    chunks[-1]["cpt_generator"] = self.inference_config.get("MODEL_NAME", "")
-                if self.keep_intermediate:
-                    chunks[-1]["bullet_points"] = bullet_text
-                    chunks[-1]["original_text"] = original_text
-
-        return chunks
+        """Build chunks for a list of entries (delegates to the two-stage pipeline)."""
+        candidates = self._prepare_chunk_candidates(entries)
+        raw_chunks = self._finalize_chunk_candidates(candidates)
+        return [{k: v for k, v in c.items() if not k.startswith("_")} for c in raw_chunks]
 
     def _normalize_text(self, text: str) -> str:
         text = text.replace("\r\n", "\n").replace("\r", "\n")
