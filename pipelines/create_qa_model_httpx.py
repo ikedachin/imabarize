@@ -67,6 +67,9 @@ class QAPipeline:
         self.wait_seconds = float(settings.get("wait_seconds", 0.25))
         self.retry_jitter_seconds = float(settings.get("retry_jitter_seconds", self.wait_seconds))
         self.retry_max_delay = float(settings.get("retry_max_delay", 30.0))
+        self.thinking_enabled_by_step = self._load_thinking_enabled_by_step(
+            settings.get("thinking_enabled_by_step", {})
+        )
 
         timeout_total = float(settings.get("read_timeout", self.inference_config.get("timeout", 600.0)))
         connect_timeout = float(settings.get("connect_timeout", 5.0))
@@ -102,6 +105,38 @@ class QAPipeline:
                 prompts_dict[key] = f.read()
         return prompts_dict
 
+    def _parse_optional_bool(self, value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+        return bool(value)
+
+    def _load_thinking_enabled_by_step(self, raw_settings: Dict[str, Any]) -> Dict[int, Optional[bool]]:
+        step_aliases = {
+            1: ("1", "step1", "step_1", "question", "question_prompt"),
+            2: ("2", "step2", "step_2", "answer", "answer_prompt"),
+            3: ("3", "step3", "step_3", "thinking", "thinking_prompt"),
+            4: ("4", "step4", "step_4", "refine", "refine_answer", "refine_answer_prompt"),
+            5: ("5", "step5", "step_5", "eval", "eval_prompt"),
+        }
+        if not isinstance(raw_settings, dict):
+            return {}
+
+        parsed: Dict[int, Optional[bool]] = {}
+        for step, aliases in step_aliases.items():
+            for alias in aliases:
+                if alias in raw_settings:
+                    parsed[step] = self._parse_optional_bool(raw_settings[alias])
+                    break
+        return parsed
+
     async def aclose(self) -> None:
         await self.client.aclose()
 
@@ -136,8 +171,8 @@ class QAPipeline:
             text = text.split(end_tag)[0]
         return text.strip()
 
-    def _chat_payload(self, prompt: str) -> Dict:
-        return {
+    def _chat_payload(self, prompt: str, step: Optional[int] = None) -> Dict:
+        payload = {
             "model": self.inference_config.get("MODEL_NAME"),
             "messages": [{"role": "user", "content": prompt}],
             "max_tokens": int(self.inference_config.get("max_tokens", 2048)),
@@ -145,6 +180,11 @@ class QAPipeline:
             "top_p": self.inference_config.get("top_p", 1.0),
             "stream": False,
         }
+        if step in self.thinking_enabled_by_step:
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": self.thinking_enabled_by_step[step],
+            }
+        return payload
 
     async def _post_chat_completion(self, payload: Dict[str, Any]) -> httpx.Response:
         return await self.client.post("/chat/completions", json=payload)
@@ -182,8 +222,8 @@ class QAPipeline:
             return f"{type(exc).__name__}: status={status_code}, body={body}"
         return f"{type(exc).__name__}: {exc}"
 
-    async def _infer_text_async(self, prompt: str) -> str:
-        payload = self._chat_payload(prompt)
+    async def _infer_text_async(self, prompt: str, step: Optional[int] = None) -> str:
+        payload = self._chat_payload(prompt, step=step)
         last_exc: Optional[Exception] = None
 
         for attempt in range(self.max_retries):
@@ -314,7 +354,8 @@ class QAPipeline:
                 prompt_template.format(
                     text=text,
                     random_token=job.payload.get("random_token", ""),
-                )
+                ),
+                step=job.step,
             )
             question_text = self._extract_tag(raw_text, "question")
             if not question_text:
@@ -326,7 +367,8 @@ class QAPipeline:
             if not prompt_template:
                 raise ValueError("answer_prompt must be set in prompts.")
             raw_text = await self._infer_text_async(
-                prompt_template.format(text=text, question=outputs.get("question", ""))
+                prompt_template.format(text=text, question=outputs.get("question", "")),
+                step=job.step,
             )
             answer_text = self._extract_tag(raw_text, "answer")
             if not answer_text:
@@ -341,7 +383,8 @@ class QAPipeline:
                         text=text,
                         question=outputs.get("question", ""),
                         answer=outputs.get("answer", ""),
-                    )
+                    ),
+                    step=job.step,
                 )
                 thinking_text = self._extract_tag(raw_text, "think") or raw_text.strip()
                 if not thinking_text:
@@ -362,7 +405,8 @@ class QAPipeline:
                         text=text,
                         question=outputs.get("question", ""),
                         answer=current_answer,
-                    )
+                    ),
+                    step=job.step,
                 )
                 refined_thinking = self._extract_tag(raw_text, "think")
                 refined_answer = self._extract_tag_if_present(raw_text, "answer")
@@ -381,7 +425,8 @@ class QAPipeline:
                     prompt_template.format(
                         think=outputs.get("thinking", ""),
                         answer=outputs.get("answer", ""),
-                    )
+                    ),
+                    step=job.step,
                 )
                 outputs["eval"] = self._extract_tag(raw_text, "eval") or raw_text.strip()
             else:

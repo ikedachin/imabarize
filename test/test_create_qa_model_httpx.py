@@ -12,7 +12,12 @@ from pipelines.create_qa_model_httpx import QAPipeline
 
 
 class FakeRollingPipeline(QAPipeline):
-    def __init__(self, tmp_path: Path, max_in_flight: int = 2) -> None:
+    def __init__(
+        self,
+        tmp_path: Path,
+        max_in_flight: int = 2,
+        thinking_enabled_by_step: Dict[str, bool] | None = None,
+    ) -> None:
         prompt_dir = tmp_path / "prompts"
         prompt_dir.mkdir(parents=True, exist_ok=True)
         prompts = {
@@ -39,11 +44,14 @@ class FakeRollingPipeline(QAPipeline):
                 "max_retries": 1,
                 "wait_seconds": 0,
                 "retry_jitter_seconds": 0,
+                "thinking_enabled_by_step": thinking_enabled_by_step or {},
             }
         )
         self.events: List[Dict[str, Any]] = []
+        self.payloads: List[Dict[str, Any]] = []
 
     async def _post_chat_completion(self, payload: Dict[str, Any]) -> httpx.Response:
+        self.payloads.append(payload)
         prompt = payload["messages"][0]["content"]
         item = "slow" if "item=slow" in prompt else "bad" if "item=bad" in prompt else "fast"
         step = prompt.split("STEP:", 1)[1].split(" ", 1)[0]
@@ -145,6 +153,35 @@ class RollingPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[1]["item_id"], 1)
         self.assertEqual(results[1]["eval"], "5")
         self.assertLessEqual(pipeline.max_observed_in_flight, 2)
+
+    async def test_thinking_control_is_applied_per_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = FakeRollingPipeline(
+                Path(tmpdir),
+                max_in_flight=1,
+                thinking_enabled_by_step={
+                    "question": False,
+                    "answer": False,
+                    "thinking": True,
+                    "refine_answer": False,
+                    "eval": False,
+                },
+            )
+            try:
+                await pipeline.create_qa_batch_async(["fast"], batch_size=1)
+            finally:
+                await pipeline.aclose()
+
+        step_payloads = {
+            payload["messages"][0]["content"].split("STEP:", 1)[1].split(" ", 1)[0]: payload
+            for payload in pipeline.payloads
+        }
+
+        self.assertFalse(step_payloads["question"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertFalse(step_payloads["answer"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertTrue(step_payloads["thinking"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertFalse(step_payloads["refine"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertFalse(step_payloads["eval"]["chat_template_kwargs"]["enable_thinking"])
 
 
 if __name__ == "__main__":
