@@ -17,6 +17,7 @@ class FakeRollingPipeline(QAPipeline):
         tmp_path: Path,
         max_in_flight: int = 2,
         thinking_enabled_by_step: Dict[str, bool] | None = None,
+        refine_answer_only: bool = False,
     ) -> None:
         prompt_dir = tmp_path / "prompts"
         prompt_dir.mkdir(parents=True, exist_ok=True)
@@ -24,7 +25,7 @@ class FakeRollingPipeline(QAPipeline):
             "question_prompt": "STEP:question item={text} token={random_token}",
             "answer_prompt": "STEP:answer item={text} question={question}",
             "thinking_prompt": "STEP:thinking item={text} question={question} answer={answer}",
-            "refine_answer_prompt": "STEP:refine item={text} question={question} answer={answer}",
+            "refine_answer_prompt": "STEP:refine item={text} question={question} think={think} answer={answer}",
             "eval_prompt": "STEP:eval think={think} answer={answer}",
         }
         prompt_settings: List[Dict[str, str]] = []
@@ -49,6 +50,7 @@ class FakeRollingPipeline(QAPipeline):
         )
         self.events: List[Dict[str, Any]] = []
         self.payloads: List[Dict[str, Any]] = []
+        self.refine_answer_only = refine_answer_only
 
     async def _post_chat_completion(self, payload: Dict[str, Any]) -> httpx.Response:
         self.payloads.append(payload)
@@ -89,7 +91,10 @@ class FakeRollingPipeline(QAPipeline):
         elif step == "thinking":
             content = f"<think>{item} thinking</think>"
         elif step == "refine":
-            content = f"<think>{item} refined thinking</think>\n\n{item} refined answer"
+            if self.refine_answer_only:
+                content = f"{item} refined answer"
+            else:
+                content = f"<think>{item} refined thinking</think>\n\n{item} refined answer"
         elif step == "eval":
             content = "<eval>5</eval>"
         else:
@@ -182,6 +187,39 @@ class RollingPipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(step_payloads["thinking"]["chat_template_kwargs"]["enable_thinking"])
         self.assertFalse(step_payloads["refine"]["chat_template_kwargs"]["enable_thinking"])
         self.assertFalse(step_payloads["eval"]["chat_template_kwargs"]["enable_thinking"])
+
+    async def test_refine_receives_thinking_and_answer_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = FakeRollingPipeline(Path(tmpdir), max_in_flight=1)
+            try:
+                await pipeline.create_qa_batch_async(["fast"], batch_size=1)
+            finally:
+                await pipeline.aclose()
+
+        refine_payload = next(
+            payload
+            for payload in pipeline.payloads
+            if "STEP:refine" in payload["messages"][0]["content"]
+        )
+        refine_prompt = refine_payload["messages"][0]["content"]
+        self.assertIn("think=fast thinking", refine_prompt)
+        self.assertIn("answer=fast answer", refine_prompt)
+        self.assertNotIn("<think>fast thinking</think>", refine_prompt)
+
+    async def test_answer_only_refine_does_not_overwrite_thinking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = FakeRollingPipeline(
+                Path(tmpdir),
+                max_in_flight=1,
+                refine_answer_only=True,
+            )
+            try:
+                results = await pipeline.create_qa_batch_async(["fast"], batch_size=1)
+            finally:
+                await pipeline.aclose()
+
+        self.assertEqual(results[0]["thinking"], "fast thinking")
+        self.assertEqual(results[0]["answer"], "fast refined answer")
 
 
 if __name__ == "__main__":

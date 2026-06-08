@@ -396,19 +396,16 @@ class QAPipeline:
         elif job.step == 4:
             prompt_template = self.prompts.get("refine_answer_prompt")
             if prompt_template:
-                current_answer = (
-                    f"<think>{outputs.get('thinking', '')}</think>\n\n"
-                    f"{outputs.get('answer', '')}"
-                )
                 raw_text = await self._infer_text_async(
                     prompt_template.format(
                         text=text,
                         question=outputs.get("question", ""),
-                        answer=current_answer,
+                        think=outputs.get("thinking", ""),
+                        answer=outputs.get("answer", ""),
                     ),
                     step=job.step,
                 )
-                refined_thinking = self._extract_tag(raw_text, "think")
+                refined_thinking = self._extract_tag_if_present(raw_text, "think")
                 refined_answer = self._extract_tag_if_present(raw_text, "answer")
                 if not refined_answer:
                     refined_answer = self._strip_tag_block(raw_text, "think")
