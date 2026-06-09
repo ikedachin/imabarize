@@ -1,0 +1,297 @@
+import asyncio
+import json
+import tempfile
+import time
+import unittest
+from pathlib import Path
+from typing import Any, Dict, List
+
+import httpx
+
+from main_create_imabari_qa_httpx_pipeline_pool import (
+    entry_cache_key,
+    is_entry_processed,
+    load_processed_cache_keys,
+)
+from pipelines.create_qa_model_httpx_pipeline_pool import QAPipeline
+
+
+class FakePipelinePool(QAPipeline):
+    def __init__(
+        self,
+        tmp_path: Path,
+        max_in_flight: int = 2,
+        thinking_enabled_by_step: Dict[str, bool] | None = None,
+        refine_answer_only: bool = False,
+    ) -> None:
+        prompt_dir = tmp_path / "prompts"
+        prompt_dir.mkdir(parents=True, exist_ok=True)
+        prompts = {
+            "question_prompt": "STEP:question item={text} token={random_token}",
+            "answer_prompt": "STEP:answer item={text} question={question}",
+            "thinking_prompt": "STEP:thinking item={text} question={question} answer={answer}",
+            "refine_answer_prompt": "STEP:refine item={text} question={question} think={think} answer={answer}",
+            "eval_prompt": "STEP:eval think={think} answer={answer}",
+        }
+        prompt_settings: List[Dict[str, str]] = []
+        for name, body in prompts.items():
+            path = prompt_dir / f"{name}.txt"
+            path.write_text(body, encoding="utf-8")
+            prompt_settings.append({name: str(path)})
+
+        super().__init__(
+            {
+                "SERVER_URL": "http://fake-server/v1",
+                "MODEL_NAME": "fake-model",
+                "output_path": str(tmp_path / "output"),
+                "prompts": prompt_settings,
+                "batch_size": max_in_flight,
+                "max_in_flight": max_in_flight,
+                "max_retries": 1,
+                "wait_seconds": 0,
+                "retry_jitter_seconds": 0,
+                "thinking_enabled_by_step": thinking_enabled_by_step or {},
+            }
+        )
+        self.events: List[Dict[str, Any]] = []
+        self.payloads: List[Dict[str, Any]] = []
+        self.refine_answer_only = refine_answer_only
+
+    async def _post_chat_completion(self, payload: Dict[str, Any]) -> httpx.Response:
+        self.payloads.append(payload)
+        prompt = payload["messages"][0]["content"]
+        item = "slow" if "slow" in prompt else "bad" if "bad" in prompt else "fast"
+        step = prompt.split("STEP:", 1)[1].split(" ", 1)[0]
+        self.events.append(
+            {
+                "event": "start",
+                "item": item,
+                "step": step,
+                "time": time.monotonic(),
+                "in_flight": self.current_in_flight,
+            }
+        )
+
+        if item == "slow" and step == "question":
+            await asyncio.sleep(0.2)
+        else:
+            await asyncio.sleep(0.01)
+
+        self.events.append(
+            {
+                "event": "end",
+                "item": item,
+                "step": step,
+                "time": time.monotonic(),
+                "in_flight": self.current_in_flight,
+            }
+        )
+
+        if item == "bad" and step == "answer":
+            content = ""
+        elif step == "question":
+            content = f"<question>{item} question</question>"
+        elif step == "answer":
+            content = f"<answer>{item} answer</answer>"
+        elif step == "thinking":
+            content = f"<think>{item} thinking</think>"
+        elif step == "refine":
+            if self.refine_answer_only:
+                content = f"{item} refined answer"
+            else:
+                content = f"<think>{item} refined thinking</think>\n\n{item} refined answer"
+        elif step == "eval":
+            content = "<eval>5</eval>"
+        else:
+            content = ""
+
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", "http://fake-server/v1/chat/completions"),
+            content=json.dumps(
+                {"choices": [{"message": {"content": content}}]},
+            ).encode("utf-8"),
+        )
+
+
+class PipelinePoolTests(unittest.IsolatedAsyncioTestCase):
+    async def test_item_pipeline_reaches_step5_in_order(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = FakePipelinePool(Path(tmpdir), max_in_flight=2)
+            completed_order: List[int] = []
+
+            async def on_result(item_id: int, result: Dict[str, Any]) -> None:
+                completed_order.append(item_id)
+
+            try:
+                results = await pipeline.create_qa_batch_async(
+                    ["slow", "fast"],
+                    batch_size=2,
+                    on_result=on_result,
+                )
+            finally:
+                await pipeline.aclose()
+
+        slow_question_end = next(
+            event["time"]
+            for event in pipeline.events
+            if event["event"] == "end" and event["item"] == "slow" and event["step"] == "question"
+        )
+        fast_eval_end = next(
+            event["time"]
+            for event in pipeline.events
+            if event["event"] == "end" and event["item"] == "fast" and event["step"] == "eval"
+        )
+        slow_step2_start = next(
+            event["time"]
+            for event in pipeline.events
+            if event["event"] == "start" and event["item"] == "slow" and event["step"] == "answer"
+        )
+        fast_steps = [
+            event["step"]
+            for event in pipeline.events
+            if event["event"] == "start" and event["item"] == "fast"
+        ]
+
+        self.assertLess(fast_eval_end, slow_question_end)
+        self.assertGreater(slow_step2_start, slow_question_end)
+        self.assertEqual(fast_steps, ["question", "answer", "thinking", "refine", "eval"])
+        self.assertEqual(completed_order[0], 1)
+        self.assertEqual([result["item_id"] for result in results], [0, 1])
+        self.assertEqual(results[1]["answer"], "fast refined answer")
+        self.assertLessEqual(pipeline.max_observed_in_flight, 2)
+
+    async def test_one_failed_item_does_not_stop_pipeline(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = FakePipelinePool(Path(tmpdir), max_in_flight=2)
+            try:
+                results = await pipeline.create_qa_batch_async(["bad", "fast"], batch_size=2)
+            finally:
+                await pipeline.aclose()
+
+        self.assertTrue(results[0]["failed"])
+        self.assertEqual(results[0]["failed_step"], 2)
+        self.assertFalse(results[1].get("failed", False))
+        self.assertEqual(results[1]["item_id"], 1)
+        self.assertEqual(results[1]["eval"], "5")
+        self.assertLessEqual(pipeline.max_observed_in_flight, 2)
+
+    async def test_thinking_control_is_applied_per_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = FakePipelinePool(
+                Path(tmpdir),
+                max_in_flight=1,
+                thinking_enabled_by_step={
+                    "question": False,
+                    "answer": False,
+                    "thinking": True,
+                    "refine_answer": False,
+                    "eval": False,
+                },
+            )
+            try:
+                await pipeline.create_qa_batch_async(["fast"], batch_size=1)
+            finally:
+                await pipeline.aclose()
+
+        step_payloads = {
+            payload["messages"][0]["content"].split("STEP:", 1)[1].split(" ", 1)[0]: payload
+            for payload in pipeline.payloads
+        }
+
+        self.assertFalse(step_payloads["question"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertFalse(step_payloads["answer"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertTrue(step_payloads["thinking"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertFalse(step_payloads["refine"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertFalse(step_payloads["eval"]["chat_template_kwargs"]["enable_thinking"])
+
+    async def test_refine_receives_thinking_and_answer_separately(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = FakePipelinePool(Path(tmpdir), max_in_flight=1)
+            try:
+                await pipeline.create_qa_batch_async(["fast"], batch_size=1)
+            finally:
+                await pipeline.aclose()
+
+        refine_payload = next(
+            payload
+            for payload in pipeline.payloads
+            if "STEP:refine" in payload["messages"][0]["content"]
+        )
+        refine_prompt = refine_payload["messages"][0]["content"]
+        self.assertIn("think=fast thinking", refine_prompt)
+        self.assertIn("answer=fast answer", refine_prompt)
+        self.assertNotIn("<think>fast thinking</think>", refine_prompt)
+
+    async def test_answer_only_refine_does_not_overwrite_thinking(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = FakePipelinePool(
+                Path(tmpdir),
+                max_in_flight=1,
+                refine_answer_only=True,
+            )
+            try:
+                results = await pipeline.create_qa_batch_async(["fast"], batch_size=1)
+            finally:
+                await pipeline.aclose()
+
+        self.assertEqual(results[0]["thinking"], "fast thinking")
+        self.assertEqual(results[0]["answer"], "fast refined answer")
+
+
+class PipelinePoolResumeTests(unittest.TestCase):
+    def test_entry_cache_key_uses_id_and_chunk_index(self) -> None:
+        self.assertEqual(entry_cache_key("article-1", 3), "article-1\t3")
+        self.assertEqual(entry_cache_key("article-1", None), "article-1")
+
+    def test_processed_cache_keeps_unfinished_chunk_pending(self) -> None:
+        processed_keys = {"article-1\t0"}
+
+        self.assertTrue(is_entry_processed("article-1", 0, processed_keys))
+        self.assertFalse(is_entry_processed("article-1", 1, processed_keys))
+
+    def test_legacy_id_only_cache_skips_all_chunks_for_that_id(self) -> None:
+        processed_keys = {"article-1"}
+
+        self.assertTrue(is_entry_processed("article-1", 0, processed_keys))
+        self.assertTrue(is_entry_processed("article-1", 1, processed_keys))
+
+    def test_failure_record_preserves_chunk_index(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            failure_path = Path(tmpdir) / "all.failures.jsonl"
+            pipeline = FakePipelinePool(Path(tmpdir), max_in_flight=1)
+            try:
+                pipeline.append_failure_jsonl(
+                    failure_path,
+                    {
+                        "id": "article-1",
+                        "chunk_index": 2,
+                        "source_files": ["all.jsonl"],
+                        "failed": True,
+                        "failed_step": 2,
+                        "error": "Step 2 returned empty answer.",
+                        "previous_outputs": {"question": "question"},
+                    },
+                )
+            finally:
+                asyncio.run(pipeline.aclose())
+
+            saved = json.loads(failure_path.read_text(encoding="utf-8").strip())
+
+        self.assertEqual(saved["id"], "article-1")
+        self.assertEqual(saved["chunk_index"], 2)
+        self.assertEqual(saved["source_files"], ["all.jsonl"])
+        self.assertEqual(saved["failed_step"], 2)
+
+    def test_load_processed_cache_keys_reads_compound_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            cache_path = Path(tmpdir) / "cache.txt"
+            cache_path.write_text("article-1\t0\n\narticle-2\n", encoding="utf-8")
+
+            keys = load_processed_cache_keys(cache_path)
+
+        self.assertEqual(keys, {"article-1\t0", "article-2"})
+
+
+if __name__ == "__main__":
+    unittest.main()
