@@ -16,7 +16,7 @@ MODEL_NAME: "Qwen3-30B-A3B-Instruct-2507"
 # Inference config
 # ------------------------------------
 infer_config:
-  max_tokens: 4096
+  max_tokens: 2048
   temperature: 0
   top_p: 1.0
   timeout: 600
@@ -36,8 +36,8 @@ include_title: true
 # 文字数ベースでチャンク化する。
 # tokenizer 非依存で作るため、日本語 Wikipedia の段落境界を優先して分割する。
 min_chars: 128
-max_chars: 4096
-overlap_chars: 256
+max_chars: 512
+overlap_chars: 64
 
 # ------------------------------------
 # Split settings
@@ -51,6 +51,9 @@ deduplicate: true
 # Copyright mitigation settings
 # ------------------------------------
 copyright_mitigation: true
+# original にすると、版権対策再構成に失敗したchunkは元テキストで保存して完走を優先します。
+# fail にすると、失敗chunkを all.failures.jsonl に保存します。
+copyright_mitigation_failure_policy: original
 keep_intermediate: false
 prompts:
   - to_bullet_points_prompt: ./prompts/create_cpt/to_bullet_points.txt
@@ -64,5 +67,24 @@ output_path: ./test_output/cpt/wiki
 # ------------------------------------
 # Retry settings
 # ------------------------------------
-max_retries: 3
+max_retries: 1
 wait_seconds: 5
+
+# ------------------------------------
+# httpx async pipeline-pool settings
+# ------------------------------------
+# main_create_cpt_dataset_httpx_pipeline_pool.py で使う任意設定です。
+# max_in_flight はパイプライン全体で同時に OpenAI 互換 API へ投げる最大リクエスト数です。
+max_in_flight: 8
+pipeline_batch_size: 32
+max_connections: 16
+max_keepalive_connections: 8
+connect_timeout: 5
+pool_timeout: 30
+keepalive_expiry: 120
+read_timeout: 180
+http2: false
+
+# Qwen3 などの thinking 対応モデルで chat_template_kwargs.enable_thinking を指定します。
+# 未指定にするとサーバー側の既定値を使います。
+cpt_enable_thinking: false
