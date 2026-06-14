@@ -10,6 +10,8 @@ sdg_loom`に進化しています。こちらも是非ともご覧ください�
 - `main_create_imabari_qa.py`: テキストや JSON/JSONL から Q&A データを生成
 - `main_create_imabari_qa_httpx.py`: vLLM などの OpenAI 互換サーバー向けに、httpx 非同期リクエストで Q&A データを高速生成
 - `main_create_imabari_qa_httpx_pipeline_pool.py`: `asyncio.Queue` と `asyncio.create_task` による worker pool 方式で Q&A データを逐次生成
+- `main_create_eval_qa_httpx_pipeline_pool.py`: worker pool 方式で評価用 Q&A データセットを生成
+- `main_judge_eval_qa_httpx_pipeline_pool.py`: 評価用 Q&A と回答 JSONL を外部 LLM で LLM-as-a-Judge 採点
 - `main_create_cpt_dataset.py`: テキストや JSON/JSONL から継続事前学習（CPT）用データセットを生成
 - `main_create_cpt_dataset_httpx_pipeline_pool.py`: `asyncio.Queue` と `asyncio.create_task` による worker pool 方式で CPT データセットを逐次生成
 - `main_create_grpo_qa_httpx_pipeline_pool.py`: CPT 生成済み JSONL から GRPO 向け4択 Q&A データセットを生成
@@ -29,6 +31,7 @@ Q&A 生成、今治弁変換、CPT データセット生成は OpenAI 互換 API
 - `asyncio.Queue` と `asyncio.create_task` による worker pool 型 Q&A / CPT パイプライン
 - `max_in_flight` による vLLM / OpenAI 互換 API への同時リクエスト数制御
 - 生成結果の到着順保存と、失敗レコードの `.failures.jsonl` 保存
+- 評価用 Q&A データセット生成と LLM-as-a-Judge 採点
 - GRPO / RL 用の4択 Q&A データセット生成
 - 既処理データのスキップ（`book` + `page` または `id` キャッシュ）
 - OpenRouter / ローカル OpenAI 互換 API の切り替え
@@ -40,6 +43,8 @@ Q&A 生成、今治弁変換、CPT データセット生成は OpenAI 互換 API
 - `main_create_imabari_qa.py`: Q&A 生成の実行スクリプト
 - `main_create_imabari_qa_httpx.py`: Q&A 生成の httpx 非同期版実行スクリプト
 - `main_create_imabari_qa_httpx_pipeline_pool.py`: Q&A 生成の Queue / worker pool 非同期版実行スクリプト
+- `main_create_eval_qa_httpx_pipeline_pool.py`: 評価用 Q&A 生成の Queue / worker pool 非同期版実行スクリプト
+- `main_judge_eval_qa_httpx_pipeline_pool.py`: 評価用 Q&A の LLM-as-a-Judge 実行スクリプト
 - `main_create_cpt_dataset.py`: CPT データセット生成の実行スクリプト
 - `main_create_cpt_dataset_httpx_pipeline_pool.py`: CPT データセット生成の Queue / worker pool 非同期版実行スクリプト
 - `main_create_grpo_qa_httpx_pipeline_pool.py`: GRPO 向け4択 Q&A 生成の Queue / worker pool 非同期版実行スクリプト
@@ -49,14 +54,18 @@ Q&A 生成、今治弁変換、CPT データセット生成は OpenAI 互換 API
 - `pipelines/create_qa_model.py`: Q&A 生成の推論処理
 - `pipelines/create_qa_model_httpx.py`: Q&A 生成の httpx 非同期推論処理
 - `pipelines/create_qa_model_httpx_pipeline_pool.py`: Queue / worker pool 方式の httpx 非同期 Q&A 推論処理
+- `pipelines/judge_eval_qa_httpx_pipeline_pool.py`: Queue / worker pool 方式の LLM-as-a-Judge 採点処理
 - `pipelines/create_cpt_dataset.py`: CPT 用の正規化・チャンク化・保存処理
 - `pipelines/create_cpt_dataset_httpx_pipeline_pool.py`: Queue / worker pool 方式の httpx 非同期 CPT 生成処理
 - `pipelines/create_rl_qa_httpx_pipeline_pool.py`: Queue / worker pool 方式の httpx 非同期 GRPO 4択 Q&A 生成処理
 - `prompts/imabarize.md`: 今治弁変換プロンプト
 - `prompts/create_qa/`: Q&A 生成プロンプト群
+- `prompts/judge_eval_qa/`: LLM-as-a-Judge 採点プロンプト群
 - `prompts/create_cpt/`: CPT 版権対策用プロンプト群
 - `prompts/create_rl_qa/`: GRPO 4択 Q&A 生成プロンプト群
 - `yamls/imabari_settings_format.yaml`: Q&A 生成向け設定テンプレート
+- `yamls/eval_qa_settings_format.yaml`: 評価用 Q&A 生成向け設定テンプレート
+- `yamls/judge_eval_qa_settings_format.yaml`: LLM-as-a-Judge 採点向け設定テンプレート
 - `yamls/cpt_wiki_settings_format.yaml`: CPT 生成向け設定テンプレート
 - `yamls/create_rl_qa_settings_format.yaml`: GRPO 4択 Q&A 生成向け設定テンプレート
 - `test_source/`: 入力サンプル
@@ -185,11 +194,68 @@ thinking_enabled_by_step:
   eval: false
 ```
 
-### B. CPT データセット生成
+### B. 評価用 Q&A データセット生成
+
+評価用 Q&A は既存の Q&A JSONL と同じ形式で出力します。実装は `main_create_imabari_qa_httpx_pipeline_pool.py` と同じ worker pool 型の生成処理を使い、評価用途の設定テンプレートを分けています。
+
+設定テンプレートをコピーして編集:
+
+```bash
+cp yamls/eval_qa_settings_format.yaml yamls/eval_qa_settings.yaml
+```
+
+実行例:
+
+```bash
+python main_create_eval_qa_httpx_pipeline_pool.py \
+  -s ./test_source/JaQuAD_jsonls/validation.jsonl \
+  -p ./yamls/eval_qa_settings.yaml \
+  -t context
+```
+
+出力先は YAML の `output_path` で指定します。出力レコードは `id` / `chunk_index` / `source_files` / `question` / `thinking` / `answer` / `eval` / `qa_generator` / `messages` を持つ既存 Q&A 互換 JSONL です。JSON/JSONL 入力では `id` と `chunk_index` を組み合わせた cache key で再実行済みレコードをスキップします。
+
+### C. LLM-as-a-Judge 評価
+
+`main_judge_eval_qa_httpx_pipeline_pool.py` は、評価用 Q&A JSONL と評価対象モデルの回答 JSONL を突合し、外部 LLM で採点します。このスクリプトは評価対象モデルの回答生成は行いません。
+
+設定テンプレートをコピーして編集:
+
+```bash
+cp yamls/judge_eval_qa_settings_format.yaml yamls/judge_eval_qa_settings.yaml
+```
+
+評価対象モデルの回答 JSONL は、最低限以下のキーを持たせます。
+
+```json
+{"id":"371","chunk_index":0,"question":"...","answer":"評価対象モデルの回答"}
+```
+
+`question` は任意です。突合は `id` と `chunk_index` を優先し、`chunk_index` がないデータでは `id` 単位でも扱えます。回答本文のキー名を変えたい場合は YAML の `candidate_answer_key` を変更します。
+
+実行例:
+
+```bash
+python main_judge_eval_qa_httpx_pipeline_pool.py \
+  -q ./test_output/eval_qa/validation.jsonl \
+  -a ./test_output/eval_answers/answers.jsonl \
+  -p ./yamls/judge_eval_qa_settings.yaml
+```
+
+Judge の出力は YAML の `output_path` に保存されます。
+
+- `all.jsonl`: `id` / `chunk_index` / `question` / `reference_answer` / `candidate_answer` / `judge_score` / `judge_label` / `judge_reason` / `judge_model`
+- `all.failures.jsonl`: 採点に失敗したレコード。`failed_step` / `error` / `previous_outputs` を保存します。
+- `cache_processed_ids.txt`: 再実行時に採点済みレコードをスキップする cache key。
+- `stats.json`: 保存件数、失敗件数、ラベル別件数などの集計。
+
+`judge_score` は 1 から 5 の整数、`judge_label` は `correct` / `partially_correct` / `incorrect` / `unjudgeable` のいずれかです。
+
+### D. CPT データセット生成
 
 `test_source/wiki/raw.jsonl` の `content` を使って、継続事前学習向けの `train.jsonl` / `validation.jsonl` を作ります。`copyright_mitigation: true` の場合は、OpenAI 互換 API で「箇条書き化 → 再文章化」を行ってから保存します。
 
-#### B-1. 同期版（`main_create_cpt_dataset.py`）
+#### D-1. 同期版（`main_create_cpt_dataset.py`）
 
 ```bash
 python main_create_cpt_dataset.py \
@@ -197,7 +263,7 @@ python main_create_cpt_dataset.py \
   -p ./yamls/cpt_wiki_settings_format.yaml
 ```
 
-#### B-2. Queue / worker pool 非同期版（`main_create_cpt_dataset_httpx_pipeline_pool.py`）
+#### D-2. Queue / worker pool 非同期版（`main_create_cpt_dataset_httpx_pipeline_pool.py`）
 
 `asyncio.Queue` にCPTチャンク候補を積み、`asyncio.create_task` で起動した複数workerが空き次第「箇条書き化 → 再文章化 → 保存用chunk作成」を進めます。`max_in_flight` はパイプライン全体で同時に vLLM / OpenAI 互換 API へ投げてよい最大リクエスト数です。
 
@@ -247,7 +313,7 @@ test_output/cpt/wiki/stats.json
 - `train_ratio`: train 分割比率
 - `text_key`: 出力 JSONL の本文キー（通常は `text`）
 
-### C. GRPO 向け4択 Q&A データセット生成
+### E. GRPO 向け4択 Q&A データセット生成
 
 `test_output/cpt/wiki/all.jsonl` の `text` を参照情報として使い、GRPO / RL 用の4択 Q&A データセットを作ります。既存の Q&A / CPT 生成スクリプトは残したまま、以下の2ファイルで動作します。
 
@@ -305,29 +371,33 @@ test_output/rl_qa/wiki/stats.json
 - `prompts`: `prompts/create_rl_qa/` 配下の4 step 用プロンプト
 - `thinking_enabled_by_step`: step ごとの `chat_template_kwargs.enable_thinking` 切り替え
 
-### D. CPT データセットのアップロード（`main_upload_cpt_dataset.py`）
+### F. データセットのアップロード（`main_upload_dataset.py`）
 
-`main_create_cpt_dataset.py` または `main_create_cpt_dataset_httpx_pipeline_pool.py` で生成した CPT データセットを Hugging Face Hub の dataset repository にアップロードします。デフォルトでは `all.jsonl` を canonical なアップロード対象にし、`--include-splits` を付けた場合だけ `train.jsonl` / `validation.jsonl` もアップロードします。
+生成済みの CPT / QA / GRPO データセットを Hugging Face Hub の dataset repository にアップロードします。デフォルトでは `all.jsonl` を canonical なアップロード対象にし、`--include-splits` を付けた場合だけ `train.jsonl` / `validation.jsonl` もアップロードします。
+
+アップロード前に JSONL record から除外するキーは `--exclude-upload-key` または `--exclude-upload-keys` で指定できます。デフォルトでは `item_id` のみ除外します。
 
 dry-run:
 
 ```bash
-python main_upload_cpt_dataset.py \
-  --repo-id YOUR_NAME/YOUR_DATASET \
-  --settings-path ./yamls/cpt_wiki_settings_format.yaml \
-  --dry-run
+python main_upload_dataset.py \
+  --repo_id YOUR_NAME/YOUR_DATASET \
+  --settings_path ./yamls/cpt_wiki_settings_format.yaml \
+  --dry-run \
+  --exclude-upload-key source_file \
+  --exclude-upload-key copyright_mitigation
 ```
 
 アップロード:
 
 ```bash
-python main_upload_cpt_dataset.py \
-  --repo-id YOUR_NAME/YOUR_DATASET \
-  --hf-token YOUR_HF_TOKEN \
-  --settings-path ./yamls/cpt_wiki_settings_format.yaml
+python main_upload_dataset.py \
+  --repo_id YOUR_NAME/YOUR_DATASET \
+  --hf_token YOUR_HF_TOKEN \
+  --settings_path ./yamls/cpt_wiki_settings_format.yaml
 ```
 
-### E. Wikipedia XML 抽出（`main_extract_wiki.py`）
+### G. Wikipedia XML 抽出（`main_extract_wiki.py`）
 
 Wikipedia の XML ダンプから、タイトルまたは本文に `今治` を含む一般記事を抽出し、CPT 生成などで使いやすい JSONL に保存します。非圧縮 XML と `.bz2` 圧縮済み XML の両方に対応しています。
 
