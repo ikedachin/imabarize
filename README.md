@@ -12,6 +12,7 @@ sdg_loom`に進化しています。こちらも是非ともご覧ください�
 - `main_create_imabari_qa_httpx_pipeline_pool.py`: `asyncio.Queue` と `asyncio.create_task` による worker pool 方式で Q&A データを逐次生成
 - `main_create_cpt_dataset.py`: テキストや JSON/JSONL から継続事前学習（CPT）用データセットを生成
 - `main_create_cpt_dataset_httpx_pipeline_pool.py`: `asyncio.Queue` と `asyncio.create_task` による worker pool 方式で CPT データセットを逐次生成
+- `main_create_grpo_qa_httpx_pipeline_pool.py`: CPT 生成済み JSONL から GRPO 向け4択 Q&A データセットを生成
 - `main_upload_cpt_dataset.py`: 生成済み CPT データセットを Hugging Face Hub にアップロード
 - `main_extract_wiki.py`: Wikipedia XML ダンプから特定キーワードを含む記事を抽出し JSONL に保存
 
@@ -28,6 +29,7 @@ Q&A 生成、今治弁変換、CPT データセット生成は OpenAI 互換 API
 - `asyncio.Queue` と `asyncio.create_task` による worker pool 型 Q&A / CPT パイプライン
 - `max_in_flight` による vLLM / OpenAI 互換 API への同時リクエスト数制御
 - 生成結果の到着順保存と、失敗レコードの `.failures.jsonl` 保存
+- GRPO / RL 用の4択 Q&A データセット生成
 - 既処理データのスキップ（`book` + `page` または `id` キャッシュ）
 - OpenRouter / ローカル OpenAI 互換 API の切り替え
 - 一部作成者の都合により使っていない機能があります
@@ -40,6 +42,7 @@ Q&A 生成、今治弁変換、CPT データセット生成は OpenAI 互換 API
 - `main_create_imabari_qa_httpx_pipeline_pool.py`: Q&A 生成の Queue / worker pool 非同期版実行スクリプト
 - `main_create_cpt_dataset.py`: CPT データセット生成の実行スクリプト
 - `main_create_cpt_dataset_httpx_pipeline_pool.py`: CPT データセット生成の Queue / worker pool 非同期版実行スクリプト
+- `main_create_grpo_qa_httpx_pipeline_pool.py`: GRPO 向け4択 Q&A 生成の Queue / worker pool 非同期版実行スクリプト
 - `main_upload_cpt_dataset.py`: CPT データセットの Hugging Face Hub アップロードスクリプト
 - `main_extract_wiki.py`: Wikipedia XML ダンプから今治関連記事を抽出する実行スクリプト
 - `pipelines/imabarize_pipeline.py`: 今治弁変換の推論・保存処理
@@ -48,11 +51,14 @@ Q&A 生成、今治弁変換、CPT データセット生成は OpenAI 互換 API
 - `pipelines/create_qa_model_httpx_pipeline_pool.py`: Queue / worker pool 方式の httpx 非同期 Q&A 推論処理
 - `pipelines/create_cpt_dataset.py`: CPT 用の正規化・チャンク化・保存処理
 - `pipelines/create_cpt_dataset_httpx_pipeline_pool.py`: Queue / worker pool 方式の httpx 非同期 CPT 生成処理
+- `pipelines/create_rl_qa_httpx_pipeline_pool.py`: Queue / worker pool 方式の httpx 非同期 GRPO 4択 Q&A 生成処理
 - `prompts/imabarize.md`: 今治弁変換プロンプト
 - `prompts/create_qa/`: Q&A 生成プロンプト群
 - `prompts/create_cpt/`: CPT 版権対策用プロンプト群
+- `prompts/create_rl_qa/`: GRPO 4択 Q&A 生成プロンプト群
 - `yamls/imabari_settings_format.yaml`: Q&A 生成向け設定テンプレート
 - `yamls/cpt_wiki_settings_format.yaml`: CPT 生成向け設定テンプレート
+- `yamls/create_rl_qa_settings_format.yaml`: GRPO 4択 Q&A 生成向け設定テンプレート
 - `test_source/`: 入力サンプル
 - `test_output/`: 出力先サンプル
 
@@ -241,7 +247,65 @@ test_output/cpt/wiki/stats.json
 - `train_ratio`: train 分割比率
 - `text_key`: 出力 JSONL の本文キー（通常は `text`）
 
-### C. CPT データセットのアップロード（`main_upload_cpt_dataset.py`）
+### C. GRPO 向け4択 Q&A データセット生成
+
+`test_output/cpt/wiki/all.jsonl` の `text` を参照情報として使い、GRPO / RL 用の4択 Q&A データセットを作ります。既存の Q&A / CPT 生成スクリプトは残したまま、以下の2ファイルで動作します。
+
+- `main_create_grpo_qa_httpx_pipeline_pool.py`
+- `pipelines/create_rl_qa_httpx_pipeline_pool.py`
+
+実行例:
+
+```bash
+python main_create_grpo_qa_httpx_pipeline_pool.py \
+  -p ./yamls/create_rl_qa_settings_format.yaml
+```
+
+入力を明示する場合:
+
+```bash
+python main_create_grpo_qa_httpx_pipeline_pool.py \
+  -s ./test_output/cpt/wiki/all.jsonl \
+  -p ./yamls/create_rl_qa_settings_format.yaml
+```
+
+パイプラインは item ごとに以下の4 stepを順に実行します。
+
+1. 参照情報をもとに標準語の問題文を作成
+2. 参照情報なしで同じモデルに回答させる
+3. 参照情報ありで正確な回答と根拠を作成
+4. 無参照回答と参照あり回答を比較し、RL 用の4択選択肢と適性判定を作成
+
+主な特徴:
+
+- 有効な入力行から `seed` 固定で最大 `sample_size` 件をランダム抽出します。
+- `asyncio.Queue` に item id を投入し、worker が item 単位で step 1 から step 4 まで処理します。
+- worker 数は `min(max_in_flight, 入力件数)` で決まります。
+- `max_in_flight` はパイプライン全体で同時に OpenAI 互換 API へ投げてよい最大リクエスト数です。
+- `pipeline_batch_size` は入力処理窓の目安で、ログ上 `input_window_hint` として表示されます。
+- 成功した item は `all.jsonl` に保存し、`rl_suitability == "accepted"` の行を学習対象として使えます。
+- 失敗した item は `all.failures.jsonl` に `failed_step` / `error` / `previous_outputs` を保存します。
+- 再実行時は `cache_processed_ids.txt` の `id + chunk_index` で成功済み item をスキップします。
+
+デフォルト出力:
+
+```text
+test_output/rl_qa/wiki/all.jsonl
+test_output/rl_qa/wiki/all.failures.jsonl
+test_output/rl_qa/wiki/cache_processed_ids.txt
+test_output/rl_qa/wiki/stats.json
+```
+
+主な設定:
+
+- `source_path`: 入力 JSONL（デフォルトは `./test_output/cpt/wiki/all.jsonl`）
+- `target_key`: 参照情報として使う本文キー（CPT 出力では `text`）
+- `sample_size`: ランダム抽出する最大件数
+- `seed`: ランダム抽出の固定 seed
+- `prompts`: `prompts/create_rl_qa/` 配下の4 step 用プロンプト
+- `thinking_enabled_by_step`: step ごとの `chat_template_kwargs.enable_thinking` 切り替え
+
+### D. CPT データセットのアップロード（`main_upload_cpt_dataset.py`）
 
 `main_create_cpt_dataset.py` または `main_create_cpt_dataset_httpx_pipeline_pool.py` で生成した CPT データセットを Hugging Face Hub の dataset repository にアップロードします。デフォルトでは `all.jsonl` を canonical なアップロード対象にし、`--include-splits` を付けた場合だけ `train.jsonl` / `validation.jsonl` もアップロードします。
 
@@ -263,7 +327,7 @@ python main_upload_cpt_dataset.py \
   --settings-path ./yamls/cpt_wiki_settings_format.yaml
 ```
 
-### D. Wikipedia XML 抽出（`main_extract_wiki.py`）
+### E. Wikipedia XML 抽出（`main_extract_wiki.py`）
 
 Wikipedia の XML ダンプから、タイトルまたは本文に `今治` を含む一般記事を抽出し、CPT 生成などで使いやすい JSONL に保存します。非圧縮 XML と `.bz2` 圧縮済み XML の両方に対応しています。
 
@@ -318,6 +382,12 @@ CPT データセット生成（`main_create_cpt_dataset.py`）では、以下の
 
 ```json
 {"text":"記事タイトル\n\n本文...", "id":"371", "title":"愛媛県", "source_file":"...", "chunk_index":0}
+```
+
+GRPO 向け4択 Q&A 生成（`main_create_grpo_qa_httpx_pipeline_pool.py`）では、以下のように問題、4択、正解、無参照回答、参照あり回答、適性判定を持つ JSONL が出力されます。
+
+```json
+{"id":"371","chunk_index":0,"title":"愛媛県","question":"...","choices":[{"label":"A","text":"..."},{"label":"B","text":"..."},{"label":"C","text":"..."},{"label":"D","text":"..."}],"correct_label":"A","correct_answer":"...","blind_answer":"...","grounded_answer":"...","evidence":"...","difficulty":"borderline","rl_suitability":"accepted","rejection_reason":"","qa_generator":"Qwen3-30B-A3B-Instruct-2507","messages":[{"role":"user","content":"..."},{"role":"assistant","content":"A. ..."}]}
 ```
 
 ## 再実行時のスキップ仕様
