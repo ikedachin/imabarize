@@ -213,7 +213,17 @@ python main_create_eval_qa_httpx_pipeline_pool.py \
   -t context
 ```
 
-出力先は YAML の `output_path` で指定します。出力レコードは `id` / `chunk_index` / `source_files` / `question` / `thinking` / `answer` / `eval` / `qa_generator` / `messages` を持つ既存 Q&A 互換 JSONL です。JSON/JSONL 入力では `id` と `chunk_index` を組み合わせた cache key で再実行済みレコードをスキップします。
+作成件数は YAML の `sample_size` で指定できます。`sample_size: 100` なら未処理候補から最大100件を `seed` 固定でサンプリングします。CLI で一時的に上書きする場合は `-n` / `--sample_size` を使います。
+
+```bash
+python main_create_eval_qa_httpx_pipeline_pool.py \
+  -s ./test_source/JaQuAD_jsonls/validation.jsonl \
+  -p ./yamls/eval_qa_settings.yaml \
+  -t context \
+  -n 50
+```
+
+`sample_size` を `null` または 0 以下にすると全件処理します。出力先は YAML の `output_path` で指定します。出力レコードは `id` / `chunk_index` / `source_files` / `question` / `thinking` / `answer` / `eval` / `qa_generator` / `messages` を持つ既存 Q&A 互換 JSONL です。JSON/JSONL 入力では `id` と `chunk_index` を組み合わせた cache key で再実行済みレコードをスキップします。
 
 ### C. LLM-as-a-Judge 評価
 
