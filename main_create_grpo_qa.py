@@ -5,7 +5,7 @@ from pathlib import Path
 
 from commons.util_settings import load_settings
 from commons.utils_msg import msg_error, msg_info, msg_success
-from pipelines.create_rl_qa_httpx_pipeline_pool import RLQAPipeline
+from pipelines.create_rl_qa import RLQAPipeline
 
 
 async def main(settings_path: str | None, source_path: str | None) -> None:
@@ -42,7 +42,7 @@ if __name__ == "__main__":
         "-p",
         "--settings_path",
         nargs="?",
-        default="./yamls/create_rl_qa_settings_format.yaml",
+        default="./yamls/create_grpo_qa_settings_format.yaml",
         help="Path to the settings YAML file",
     )
     parser.add_argument(

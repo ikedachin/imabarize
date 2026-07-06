@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 import httpx
 
-from pipelines.create_cpt_dataset_httpx_pipeline_pool import CPTDatasetPipelinePool
+from pipelines.create_cpt_dataset import CPTDatasetPipelinePool
 
 
 class FakeCPTPipelinePool(CPTDatasetPipelinePool):

@@ -11,7 +11,7 @@ from commons.util_settings import load_settings
 from commons.utils_msg import msg_error, msg_info, msg_success
 
 
-DEFAULT_SETTINGS_PATH = "./yamls/cpt_wiki_settings_format.yaml"
+DEFAULT_SETTINGS_PATH = "./yamls/upload_dataset_settings_format.yaml"
 DEFAULT_DATASET_PATH = "./test_output/cpt/wiki"
 DEFAULT_EXCLUDE_UPLOAD_KEYS = ("item_id",)
 DatasetKind = Literal["auto", "cpt", "qa", "grpo"]

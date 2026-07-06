@@ -7,27 +7,22 @@ sdg_loom`に進化しています。こちらも是非ともご覧ください�
 
 
 このリポジトリは主に以下の処理を行います。
-- `main_create_imabari_qa.py`: テキストや JSON/JSONL から Q&A データを生成
-- `main_create_imabari_qa_httpx.py`: vLLM などの OpenAI 互換サーバー向けに、httpx 非同期リクエストで Q&A データを高速生成
-- `main_create_imabari_qa_httpx_pipeline_pool.py`: `asyncio.Queue` と `asyncio.create_task` による worker pool 方式で Q&A データを逐次生成
-- `main_create_eval_qa_httpx_pipeline_pool.py`: worker pool 方式で評価用 Q&A データセットを生成
-- `main_judge_eval_qa_httpx_pipeline_pool.py`: 評価用 Q&A と回答 JSONL を外部 LLM で LLM-as-a-Judge 採点
-- `main_create_cpt_dataset.py`: テキストや JSON/JSONL から継続事前学習（CPT）用データセットを生成
-- `main_create_cpt_dataset_httpx_pipeline_pool.py`: `asyncio.Queue` と `asyncio.create_task` による worker pool 方式で CPT データセットを逐次生成
-- `main_create_grpo_qa_httpx_pipeline_pool.py`: CPT 生成済み JSONL から GRPO 向け4択 Q&A データセットを生成
-- `main_upload_cpt_dataset.py`: 生成済み CPT データセットを Hugging Face Hub にアップロード
+- `main_create_imabari_qa.py`: `asyncio.Queue` と `asyncio.create_task` による worker pool 方式で Q&A データを逐次生成
+- `main_create_eval_qa.py`: worker pool 方式で評価用 Q&A データセットを生成
+- `main_judge_eval_qa.py`: 評価用 Q&A と回答 JSONL を外部 LLM で LLM-as-a-Judge 採点
+- `main_create_cpt_dataset.py`: `asyncio.Queue` と `asyncio.create_task` による worker pool 方式で CPT データセットを逐次生成
+- `main_create_grpo_qa.py`: CPT 生成済み JSONL から GRPO 向け4択 Q&A データセットを生成
+- `main_upload_dataset.py`: 生成済み CPT データセットを Hugging Face Hub にアップロード
 - `main_extract_wiki.py`: Wikipedia XML ダンプから特定キーワードを含む記事を抽出し JSONL に保存
 
 Q&A 生成、今治弁変換、CPT データセット生成は OpenAI 互換 API（OpenRouter またはローカルサーバー）を利用できます。CPT データセット生成では、必要に応じて入力テキストを箇条書き化してから再度文章化し、文章を再構成した JSONL を保存します。Wikipedia 抽出は API を使わず、XML または `.bz2` 圧縮済み XML を直接パースします。
 
 ## 主な機能
 
-- JSON / JSONL / テキスト入力のバッチ処理
+- JSON / JSONL / テキスト入力からの Q&A / CPT データセット生成
 - Wikipedia XML / XML.BZ2 ダンプからのキーワード記事抽出
 - `target_key` 指定による対象キーの切り替え
 - CPT 用の本文正規化・チャンク化・版権対策再構成・train/validation 分割
-- バッチ推論（`batch_size`）
-- `httpx.AsyncClient` による非同期 Q&A 生成
 - `asyncio.Queue` と `asyncio.create_task` による worker pool 型 Q&A / CPT パイプライン
 - `max_in_flight` による vLLM / OpenAI 互換 API への同時リクエスト数制御
 - 生成結果の到着順保存と、失敗レコードの `.failures.jsonl` 保存
@@ -40,34 +35,29 @@ Q&A 生成、今治弁変換、CPT データセット生成は OpenAI 互換 API
 
 ## リポジトリ構成
 
-- `main_create_imabari_qa.py`: Q&A 生成の実行スクリプト
-- `main_create_imabari_qa_httpx.py`: Q&A 生成の httpx 非同期版実行スクリプト
-- `main_create_imabari_qa_httpx_pipeline_pool.py`: Q&A 生成の Queue / worker pool 非同期版実行スクリプト
-- `main_create_eval_qa_httpx_pipeline_pool.py`: 評価用 Q&A 生成の Queue / worker pool 非同期版実行スクリプト
-- `main_judge_eval_qa_httpx_pipeline_pool.py`: 評価用 Q&A の LLM-as-a-Judge 実行スクリプト
-- `main_create_cpt_dataset.py`: CPT データセット生成の実行スクリプト
-- `main_create_cpt_dataset_httpx_pipeline_pool.py`: CPT データセット生成の Queue / worker pool 非同期版実行スクリプト
-- `main_create_grpo_qa_httpx_pipeline_pool.py`: GRPO 向け4択 Q&A 生成の Queue / worker pool 非同期版実行スクリプト
-- `main_upload_cpt_dataset.py`: CPT データセットの Hugging Face Hub アップロードスクリプト
+- `main_create_imabari_qa.py`: Q&A 生成の Queue / worker pool 非同期版実行スクリプト
+- `main_create_eval_qa.py`: 評価用 Q&A 生成の Queue / worker pool 非同期版実行スクリプト
+- `main_judge_eval_qa.py`: 評価用 Q&A の LLM-as-a-Judge 実行スクリプト
+- `main_create_cpt_dataset.py`: CPT データセット生成の Queue / worker pool 非同期版実行スクリプト
+- `main_create_grpo_qa.py`: GRPO 向け4択 Q&A 生成の Queue / worker pool 非同期版実行スクリプト
+- `main_upload_dataset.py`: CPT データセットの Hugging Face Hub アップロードスクリプト
 - `main_extract_wiki.py`: Wikipedia XML ダンプから今治関連記事を抽出する実行スクリプト
 - `pipelines/imabarize_pipeline.py`: 今治弁変換の推論・保存処理
-- `pipelines/create_qa_model.py`: Q&A 生成の推論処理
-- `pipelines/create_qa_model_httpx.py`: Q&A 生成の httpx 非同期推論処理
-- `pipelines/create_qa_model_httpx_pipeline_pool.py`: Queue / worker pool 方式の httpx 非同期 Q&A 推論処理
-- `pipelines/judge_eval_qa_httpx_pipeline_pool.py`: Queue / worker pool 方式の LLM-as-a-Judge 採点処理
-- `pipelines/create_cpt_dataset.py`: CPT 用の正規化・チャンク化・保存処理
-- `pipelines/create_cpt_dataset_httpx_pipeline_pool.py`: Queue / worker pool 方式の httpx 非同期 CPT 生成処理
-- `pipelines/create_rl_qa_httpx_pipeline_pool.py`: Queue / worker pool 方式の httpx 非同期 GRPO 4択 Q&A 生成処理
+- `pipelines/create_qa_model.py`: Queue / worker pool 方式の httpx 非同期 Q&A 推論処理
+- `pipelines/judge_eval_qa.py`: Queue / worker pool 方式の LLM-as-a-Judge 採点処理
+- `pipelines/create_cpt_dataset.py`: Queue / worker pool 方式の httpx 非同期 CPT 生成処理
+- `pipelines/create_rl_qa.py`: Queue / worker pool 方式の httpx 非同期 GRPO 4択 Q&A 生成処理
 - `prompts/imabarize.md`: 今治弁変換プロンプト
 - `prompts/create_qa/`: Q&A 生成プロンプト群
 - `prompts/judge_eval_qa/`: LLM-as-a-Judge 採点プロンプト群
 - `prompts/create_cpt/`: CPT 版権対策用プロンプト群
 - `prompts/create_rl_qa/`: GRPO 4択 Q&A 生成プロンプト群
-- `yamls/imabari_settings_format.yaml`: Q&A 生成向け設定テンプレート
-- `yamls/eval_qa_settings_format.yaml`: 評価用 Q&A 生成向け設定テンプレート
-- `yamls/judge_eval_qa_settings_format.yaml`: LLM-as-a-Judge 採点向け設定テンプレート
-- `yamls/cpt_wiki_settings_format.yaml`: CPT 生成向け設定テンプレート
-- `yamls/create_rl_qa_settings_format.yaml`: GRPO 4択 Q&A 生成向け設定テンプレート
+- `yamls/create_imabari_qa_settings_format.yaml`: Q&A 生成（`main_create_imabari_qa.py`）向け設定テンプレート
+- `yamls/create_eval_qa_settings_format.yaml`: 評価用 Q&A 生成（`main_create_eval_qa.py`）向け設定テンプレート
+- `yamls/judge_eval_qa_settings_format.yaml`: LLM-as-a-Judge 採点（`main_judge_eval_qa.py`）向け設定テンプレート
+- `yamls/create_cpt_dataset_settings_format.yaml`: CPT 生成（`main_create_cpt_dataset.py`）向け設定テンプレート
+- `yamls/create_grpo_qa_settings_format.yaml`: GRPO 4択 Q&A 生成（`main_create_grpo_qa.py`）向け設定テンプレート
+- `yamls/upload_dataset_settings_format.yaml`: データセットアップロード（`main_upload_dataset.py`）向け設定テンプレート
 - `test_source/`: 入力サンプル
 - `test_output/`: 出力先サンプル
 
@@ -104,51 +94,22 @@ pip install -r requirements.txt
 設定テンプレートをコピーして編集:
 
 ```bash
-cp yamls/imabari_settings_format.yaml yamls/imabari_settings.yaml
+cp yamls/create_imabari_qa_settings_format.yaml yamls/create_imabari_qa_settings.yaml
 ```
 
-#### A-1. 同期版（`main_create_imabari_qa.py`）
+`asyncio.Queue` に入力 item を積み、`asyncio.create_task` で起動した複数 worker が item ごとに Q&A 生成の各 step を進める Queue / worker pool 方式です。Step 単位で全件完了を待つ同期バリアを置かず、処理できる item から逐次進みます。
 
-既存の同期版です。シンプルな処理確認や低並列での生成に使います。
+以下の2ファイルで動作します。
+
+- `main_create_imabari_qa.py`
+- `pipelines/create_qa_model.py`
+
+実行例:
 
 ```bash
 python main_create_imabari_qa.py \
   -s ./test_source/JaQuAD_jsonls/validation.jsonl \
-  -p ./yamls/imabari_settings.yaml \
-  -t context
-```
-
-#### A-2. httpx 非同期版（`main_create_imabari_qa_httpx.py`）
-
-vLLM などのローカル OpenAI 互換サーバーを高負荷で回したい場合は、httpx 非同期版を使えます。既存の同期版ファイルは残したまま、以下の2ファイルで動作します。
-
-- `main_create_imabari_qa_httpx.py`
-- `pipelines/create_qa_model_httpx.py`
-
-実行例:
-
-```bash
-python main_create_imabari_qa_httpx.py \
-  -s ./test_source/JaQuAD_jsonls/validation.jsonl \
-  -p ./yamls/imabari_settings.yaml \
-  -t context
-```
-
-#### A-3. Queue / worker pool 非同期版（`main_create_imabari_qa_httpx_pipeline_pool.py`）
-
-`asyncio.Queue` に入力 item を積み、`asyncio.create_task` で起動した複数 worker が item ごとに Q&A 生成の各 step を進める版です。Step 単位で全件完了を待つ同期バリアを置かず、処理できる item から逐次進みます。
-
-以下の2ファイルで動作します。
-
-- `main_create_imabari_qa_httpx_pipeline_pool.py`
-- `pipelines/create_qa_model_httpx_pipeline_pool.py`
-
-実行例:
-
-```bash
-python main_create_imabari_qa_httpx_pipeline_pool.py \
-  -s ./test_source/JaQuAD_jsonls/validation.jsonl \
-  -p ./yamls/imabari_settings.yaml \
+  -p ./yamls/create_imabari_qa_settings.yaml \
   -t context
 ```
 
@@ -162,7 +123,7 @@ python main_create_imabari_qa_httpx_pipeline_pool.py \
 - 失敗した item は処理全体を止めず、`.failures.jsonl` に保存されます。
 - JSON/JSONL 入力では `id` と `chunk_index` の組み合わせをキャッシュキーにできるため、CPT チャンク由来の入力も再実行しやすくなっています。
 
-httpx 非同期版と Queue / worker pool 非同期版で追加利用できる主な設定:
+Queue / worker pool 版で追加利用できる主な設定:
 
 ```yaml
 batch_size: 8
@@ -177,7 +138,7 @@ http2: false
 ```
 
 - `max_in_flight`: vLLM サーバーに同時送信する最大リクエスト数。GPU使用率を見ながら調整します。
-- `pipeline_batch_size`: 入力処理窓の目安です。Queue / worker pool 版ではログ上 `input_window_hint` として表示されます。
+- `pipeline_batch_size`: 入力処理窓の目安です。ログ上 `input_window_hint` として表示されます。
 - `max_connections` / `max_keepalive_connections`: httpx の接続プール設定です。基本は `max_in_flight` 以上にします。
 - `read_timeout`: 1リクエストの応答待ち上限です。パイプライン全体の制限時間ではありません。
 - `connect_timeout` / `pool_timeout`: 接続確立と接続プール待ちの timeout です。
@@ -196,29 +157,29 @@ thinking_enabled_by_step:
 
 ### B. 評価用 Q&A データセット生成
 
-評価用 Q&A は既存の Q&A JSONL と同じ形式で出力します。実装は `main_create_imabari_qa_httpx_pipeline_pool.py` と同じ worker pool 型の生成処理を使い、評価用途の設定テンプレートを分けています。
+評価用 Q&A は既存の Q&A JSONL と同じ形式で出力します。実装は `main_create_imabari_qa.py` と同じ worker pool 型の生成処理を使い、評価用途の設定テンプレートを分けています。
 
 設定テンプレートをコピーして編集:
 
 ```bash
-cp yamls/eval_qa_settings_format.yaml yamls/eval_qa_settings.yaml
+cp yamls/create_eval_qa_settings_format.yaml yamls/create_eval_qa_settings.yaml
 ```
 
 実行例:
 
 ```bash
-python main_create_eval_qa_httpx_pipeline_pool.py \
+python main_create_eval_qa.py \
   -s ./test_source/JaQuAD_jsonls/validation.jsonl \
-  -p ./yamls/eval_qa_settings.yaml \
+  -p ./yamls/create_eval_qa_settings.yaml \
   -t context
 ```
 
 作成件数は YAML の `sample_size` で指定できます。`sample_size: 100` なら未処理候補から最大100件を `seed` 固定でサンプリングします。CLI で一時的に上書きする場合は `-n` / `--sample_size` を使います。
 
 ```bash
-python main_create_eval_qa_httpx_pipeline_pool.py \
+python main_create_eval_qa.py \
   -s ./test_source/JaQuAD_jsonls/validation.jsonl \
-  -p ./yamls/eval_qa_settings.yaml \
+  -p ./yamls/create_eval_qa_settings.yaml \
   -t context \
   -n 50
 ```
@@ -227,7 +188,7 @@ python main_create_eval_qa_httpx_pipeline_pool.py \
 
 ### C. LLM-as-a-Judge 評価
 
-`main_judge_eval_qa_httpx_pipeline_pool.py` は、評価用 Q&A JSONL と評価対象モデルの回答 JSONL を突合し、外部 LLM で採点します。このスクリプトは評価対象モデルの回答生成は行いません。
+`main_judge_eval_qa.py` は、評価用 Q&A JSONL と評価対象モデルの回答 JSONL を突合し、外部 LLM で採点します。このスクリプトは評価対象モデルの回答生成は行いません。
 
 設定テンプレートをコピーして編集:
 
@@ -246,7 +207,7 @@ cp yamls/judge_eval_qa_settings_format.yaml yamls/judge_eval_qa_settings.yaml
 実行例:
 
 ```bash
-python main_judge_eval_qa_httpx_pipeline_pool.py \
+python main_judge_eval_qa.py \
   -q ./test_output/eval_qa/validation.jsonl \
   -a ./test_output/eval_answers/answers.jsonl \
   -p ./yamls/judge_eval_qa_settings.yaml
@@ -265,27 +226,16 @@ Judge の出力は YAML の `output_path` に保存されます。
 
 `test_source/wiki/raw.jsonl` の `content` を使って、継続事前学習向けの `train.jsonl` / `validation.jsonl` を作ります。`copyright_mitigation: true` の場合は、OpenAI 互換 API で「箇条書き化 → 再文章化」を行ってから保存します。
 
-#### D-1. 同期版（`main_create_cpt_dataset.py`）
+`asyncio.Queue` にCPTチャンク候補を積み、`asyncio.create_task` で起動した複数workerが空き次第「箇条書き化 → 再文章化 → 保存用chunk作成」を進める Queue / worker pool 方式です。`max_in_flight` はパイプライン全体で同時に vLLM / OpenAI 互換 API へ投げてよい最大リクエスト数です。
 
 ```bash
 python main_create_cpt_dataset.py \
   -s ./test_source/wiki/raw.jsonl \
-  -p ./yamls/cpt_wiki_settings_format.yaml
-```
-
-#### D-2. Queue / worker pool 非同期版（`main_create_cpt_dataset_httpx_pipeline_pool.py`）
-
-`asyncio.Queue` にCPTチャンク候補を積み、`asyncio.create_task` で起動した複数workerが空き次第「箇条書き化 → 再文章化 → 保存用chunk作成」を進めます。`max_in_flight` はパイプライン全体で同時に vLLM / OpenAI 互換 API へ投げてよい最大リクエスト数です。
-
-```bash
-python main_create_cpt_dataset_httpx_pipeline_pool.py \
-  -s ./test_source/wiki/raw.jsonl \
-  -p ./yamls/cpt_wiki_settings_format.yaml
+  -p ./yamls/create_cpt_dataset_settings_format.yaml
 ```
 
 主な特徴:
 
-- 既存の `main_create_cpt_dataset.py` / `pipelines/create_cpt_dataset.py` は残したまま使えます。
 - `copyright_mitigation: true` の場合だけHTTPリクエストを行います。
 - `copyright_mitigation: false` ではworker pool経由でもHTTPなしで通常のCPT chunkを作ります。
 - 候補単位の失敗は全体を止めず、`all.failures.jsonl` に `id` / `chunk_index` / `failed_step` / `error` を保存します。
@@ -325,24 +275,24 @@ test_output/cpt/wiki/stats.json
 
 ### E. GRPO 向け4択 Q&A データセット生成
 
-`test_output/cpt/wiki/all.jsonl` の `text` を参照情報として使い、GRPO / RL 用の4択 Q&A データセットを作ります。既存の Q&A / CPT 生成スクリプトは残したまま、以下の2ファイルで動作します。
+`test_output/cpt/wiki/all.jsonl` の `text` を参照情報として使い、GRPO / RL 用の4択 Q&A データセットを作ります。Q&A / CPT 生成と同じ Queue / worker pool 方式で、以下の2ファイルで動作します。
 
-- `main_create_grpo_qa_httpx_pipeline_pool.py`
-- `pipelines/create_rl_qa_httpx_pipeline_pool.py`
+- `main_create_grpo_qa.py`
+- `pipelines/create_rl_qa.py`
 
 実行例:
 
 ```bash
-python main_create_grpo_qa_httpx_pipeline_pool.py \
-  -p ./yamls/create_rl_qa_settings_format.yaml
+python main_create_grpo_qa.py \
+  -p ./yamls/create_grpo_qa_settings_format.yaml
 ```
 
 入力を明示する場合:
 
 ```bash
-python main_create_grpo_qa_httpx_pipeline_pool.py \
+python main_create_grpo_qa.py \
   -s ./test_output/cpt/wiki/all.jsonl \
-  -p ./yamls/create_rl_qa_settings_format.yaml
+  -p ./yamls/create_grpo_qa_settings_format.yaml
 ```
 
 パイプラインは item ごとに以下の4 stepを順に実行します。
@@ -387,12 +337,14 @@ test_output/rl_qa/wiki/stats.json
 
 アップロード前に JSONL record から除外するキーは `--exclude-upload-key` または `--exclude-upload-keys` で指定できます。デフォルトでは `item_id` のみ除外します。
 
+`--settings_path` は `output_path` を読み取るためだけに使われるため、`yamls/upload_dataset_settings_format.yaml` に加えて、生成時に使った `create_cpt_dataset_settings.yaml` / `create_imabari_qa_settings.yaml` / `create_grpo_qa_settings.yaml` などをそのまま指定してもアップロードできます。
+
 dry-run:
 
 ```bash
 python main_upload_dataset.py \
   --repo_id YOUR_NAME/YOUR_DATASET \
-  --settings_path ./yamls/cpt_wiki_settings_format.yaml \
+  --settings_path ./yamls/create_cpt_dataset_settings_format.yaml \
   --dry-run \
   --exclude-upload-key source_file \
   --exclude-upload-key copyright_mitigation
@@ -404,7 +356,7 @@ python main_upload_dataset.py \
 python main_upload_dataset.py \
   --repo_id YOUR_NAME/YOUR_DATASET \
   --hf_token YOUR_HF_TOKEN \
-  --settings_path ./yamls/cpt_wiki_settings_format.yaml
+  --settings_path ./yamls/create_cpt_dataset_settings_format.yaml
 ```
 
 ### G. Wikipedia XML 抽出（`main_extract_wiki.py`）
@@ -449,8 +401,7 @@ python main_extract_wiki.py \
 
 ### 出力（JSONL）
 
-Q&A 生成（`main_create_imabari_qa.py`）では、`question` / `thinking` / `answer` などのキーを持つ JSONL が出力されます。
-`main_create_imabari_qa_httpx.py` と `main_create_imabari_qa_httpx_pipeline_pool.py` も同じ形式を出力します。生成に失敗した item は、同名の `.failures.jsonl` に `failed_step` / `error` / `previous_outputs` などを保存します。
+Q&A 生成（`main_create_imabari_qa.py`）では、`question` / `thinking` / `answer` などのキーを持つ JSONL が出力されます。生成に失敗した item は、同名の `.failures.jsonl` に `failed_step` / `error` / `previous_outputs` などを保存します。
 
 Wikipedia 抽出（`main_extract_wiki.py`）では、以下のように `id` / `title` / `content` を持つ JSONL が出力されます。
 
@@ -464,7 +415,7 @@ CPT データセット生成（`main_create_cpt_dataset.py`）では、以下の
 {"text":"記事タイトル\n\n本文...", "id":"371", "title":"愛媛県", "source_file":"...", "chunk_index":0}
 ```
 
-GRPO 向け4択 Q&A 生成（`main_create_grpo_qa_httpx_pipeline_pool.py`）では、以下のように問題、4択、正解、無参照回答、参照あり回答、適性判定を持つ JSONL が出力されます。
+GRPO 向け4択 Q&A 生成（`main_create_grpo_qa.py`）では、以下のように問題、4択、正解、無参照回答、参照あり回答、適性判定を持つ JSONL が出力されます。
 
 ```json
 {"id":"371","chunk_index":0,"title":"愛媛県","question":"...","choices":[{"label":"A","text":"..."},{"label":"B","text":"..."},{"label":"C","text":"..."},{"label":"D","text":"..."}],"correct_label":"A","correct_answer":"...","blind_answer":"...","grounded_answer":"...","evidence":"...","difficulty":"borderline","rl_suitability":"accepted","rejection_reason":"","qa_generator":"Qwen3-30B-A3B-Instruct-2507","messages":[{"role":"user","content":"..."},{"role":"assistant","content":"A. ..."}]}
@@ -472,8 +423,7 @@ GRPO 向け4択 Q&A 生成（`main_create_grpo_qa_httpx_pipeline_pool.py`）で�
 
 ## 再実行時のスキップ仕様
 
-`main_create_imabari_qa.py` と `main_create_imabari_qa_httpx.py` はキャッシュファイルを使って `id` 単位で重複処理を避けます。
-`main_create_imabari_qa_httpx_pipeline_pool.py` は `id` に加えて `chunk_index` もキャッシュキーに含められるため、同じ `id` の複数チャンクを個別に扱えます。
+`main_create_imabari_qa.py` はキャッシュファイルを使って `id` 単位で重複処理を避けます。`id` に加えて `chunk_index` もキャッシュキーに含められるため、同じ `id` の複数チャンクを個別に扱えます。
 
 ## ライセンス
 Apache License 2.0です。

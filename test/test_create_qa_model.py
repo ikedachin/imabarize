@@ -8,12 +8,12 @@ from typing import Any, Dict, List
 
 import httpx
 
-from main_create_imabari_qa_httpx_pipeline_pool import (
+from main_create_imabari_qa import (
     entry_cache_key,
     is_entry_processed,
     load_processed_cache_keys,
 )
-from pipelines.create_qa_model_httpx_pipeline_pool import QAPipeline
+from pipelines.create_qa_model import QAPipeline
 
 
 class FakePipelinePool(QAPipeline):

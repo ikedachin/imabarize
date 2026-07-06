@@ -1,18 +1,28 @@
+import asyncio
 import json
 import random
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Iterable, List, Tuple
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import httpx
-from openai import OpenAI
-from concurrent.futures import ThreadPoolExecutor
 
-from commons.utils_msg import msg_debug, msg_info
+from commons.utils_msg import msg_debug, msg_error, msg_info
 
 
-class CPTDatasetPipeline:
+RETRYABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
+
+
+@dataclass
+class CPTCandidateResult:
+    candidate: Dict[str, Any]
+    chunk: Optional[Dict[str, Any]] = None
+    failure: Optional[Dict[str, Any]] = None
+
+
+class CPTDatasetPipelinePool:
     def __init__(self, settings: Dict):
         self.settings = settings
         self.inference_config = dict(settings.get("infer_config", {}))
@@ -33,14 +43,9 @@ class CPTDatasetPipeline:
         self.inference_config.update(
             {
                 "API_KEY": api_key,
-                "SERVER_URL": server_url,
+                "SERVER_URL": str(server_url).rstrip("/"),
                 "MODEL_NAME": model_name,
             }
-        )
-        self.client = OpenAI(
-            base_url=self.inference_config.get("SERVER_URL"),
-            api_key=self.inference_config.get("API_KEY"),
-            timeout=self.inference_config.get("timeout", 600),
         )
 
         self.target_key = settings.get("target_key", "content")
@@ -56,11 +61,20 @@ class CPTDatasetPipeline:
         self.shuffle = bool(settings.get("shuffle", True))
         self.deduplicate = bool(settings.get("deduplicate", True))
         self.batch_size = int(settings.get("batch_size", 4))
-        self.save_batch_size = int(settings.get("save_batch_size", self.batch_size))
+        self.max_in_flight = max(1, int(settings.get("max_in_flight", self.batch_size)))
+        self.pipeline_batch_size = int(
+            settings.get("pipeline_batch_size", max(self.batch_size, self.max_in_flight * 4))
+        )
         self.max_retries = int(settings.get("max_retries", 3))
         self.wait_seconds = float(settings.get("wait_seconds", 5))
+        self.retry_jitter_seconds = float(settings.get("retry_jitter_seconds", 0.2))
+        self.retry_max_delay = float(settings.get("retry_max_delay", 30.0))
         self.copyright_mitigation = bool(settings.get("copyright_mitigation", False))
+        self.copyright_mitigation_failure_policy = str(
+            settings.get("copyright_mitigation_failure_policy", "fail")
+        ).strip().lower()
         self.keep_intermediate = bool(settings.get("keep_intermediate", False))
+        self.cpt_enable_thinking = self._parse_optional_bool(settings.get("cpt_enable_thinking"))
         self.prompts = self._load_prompts(settings.get("prompts", []))
 
         if self.max_chars <= 0:
@@ -70,15 +84,52 @@ class CPTDatasetPipeline:
         if not 0.0 < self.train_ratio <= 1.0:
             raise ValueError("train_ratio must be greater than 0.0 and less than or equal to 1.0.")
 
+        self.request_semaphore = asyncio.Semaphore(self.max_in_flight)
+        self._in_flight_lock = asyncio.Lock()
+        self.current_in_flight = 0
+        self.max_observed_in_flight = 0
+
+        timeout_total = float(settings.get("read_timeout", self.inference_config.get("timeout", 600.0)))
+        connect_timeout = float(settings.get("connect_timeout", 5.0))
+        pool_timeout = float(settings.get("pool_timeout", 30.0))
+        max_connections = int(settings.get("max_connections", max(16, self.max_in_flight * 2)))
+        max_keepalive = int(settings.get("max_keepalive_connections", max(8, self.max_in_flight)))
+
+        self.client = httpx.AsyncClient(
+            base_url=self.inference_config.get("SERVER_URL"),
+            headers={
+                "Authorization": f"Bearer {self.inference_config.get('API_KEY', 'dummy')}",
+                "Content-Type": "application/json",
+            },
+            timeout=httpx.Timeout(
+                connect=connect_timeout,
+                read=timeout_total,
+                write=30.0,
+                pool=pool_timeout,
+            ),
+            limits=httpx.Limits(
+                max_connections=max_connections,
+                max_keepalive_connections=max_keepalive,
+                keepalive_expiry=float(settings.get("keepalive_expiry", 120.0)),
+            ),
+            http2=bool(settings.get("http2", False)),
+        )
+
+    def _uses_original_fallback(self) -> bool:
+        return self.copyright_mitigation_failure_policy in {"original", "use_original", "fallback_original"}
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
+
     def load_entries(self, source_path: Path) -> List[Dict]:
         entries: List[Dict] = []
         for file_path in self._collect_source_files(source_path):
             entries.extend(self._load_file(file_path))
         return entries
 
-    def build_dataset(self, source_path: Path) -> Tuple[Path, Path | None, Dict[str, int]]:
+    async def build_dataset(self, source_path: Path) -> Tuple[Path, Path | None, Dict[str, int]]:
         entries = self.load_entries(source_path)
-        chunks = self._build_and_save_chunks(entries)
+        chunks = await self._build_and_save_chunks_async(entries)
 
         if self.shuffle:
             random.Random(self.seed).shuffle(chunks)
@@ -103,12 +154,14 @@ class CPTDatasetPipeline:
             "chunks": len(chunks),
             "train_chunks": len(train_chunks),
             "validation_chunks": len(validation_chunks),
+            "failed_chunks": self._count_jsonl_records(self.output_dir / "all.failures.jsonl"),
         }
         self._write_stats(stats)
         return train_path, validation_output_path, stats
 
-    def _build_and_save_chunks(self, entries: List[Dict]) -> List[Dict]:
+    async def _build_and_save_chunks_async(self, entries: List[Dict]) -> List[Dict]:
         all_chunks_path = self.output_dir / "all.jsonl"
+        failures_path = self.output_dir / "all.failures.jsonl"
         cache_path = self.output_dir / "cache_processed_ids.txt"
         batch_status_path = self.output_dir / "batch_status.jsonl"
         all_chunks_path.touch(exist_ok=True)
@@ -122,7 +175,6 @@ class CPTDatasetPipeline:
         chunks = self._load_jsonl_records(all_chunks_path) if all_chunks_path.exists() else []
         pending_entries = [entry for entry in entries if self._entry_cache_id(entry) not in processed_ids]
 
-        # Stage 1: pre-chunk all pending entries without any LLM calls
         print(msg_info(f"Pre-chunking {len(pending_entries)} pending entries..."))
         chunk_candidates = self._prepare_chunk_candidates(pending_entries)
         print(msg_info(f"Prepared {len(chunk_candidates)} chunk candidates."))
@@ -130,7 +182,6 @@ class CPTDatasetPipeline:
         if not chunk_candidates:
             return chunks
 
-        # Count how many candidates each entry contributed so we know when it is done
         entry_candidate_counts: Dict[str, int] = {}
         for candidate in chunk_candidates:
             eid = candidate["_entry_id"]
@@ -138,69 +189,361 @@ class CPTDatasetPipeline:
 
         entry_processed_counts: Dict[str, int] = {eid: 0 for eid in entry_candidate_counts}
         entries_with_output: set[str] = set()
+        entries_with_failure: set[str] = set()
         already_cached: set[str] = set()
+        seen_texts = {str(chunk.get(self.text_key, "")) for chunk in chunks if chunk.get(self.text_key)}
+        output_lock = asyncio.Lock()
+        status_counter = 0
+        saved_count = 0
+        failed_count = 0
+        start_time = time.monotonic()
 
-        total = len(chunk_candidates)
-        num_batches = (total + self.batch_size - 1) // self.batch_size
+        queue: asyncio.Queue[Optional[Dict[str, Any]]] = asyncio.Queue()
+        for candidate in chunk_candidates:
+            await queue.put(candidate)
 
-        # Stage 2: run LLM inference in batches of batch_size across all candidates
-        for batch_num, batch_start in enumerate(range(0, total, self.batch_size), start=1):
-            batch = chunk_candidates[batch_start : batch_start + self.batch_size]
-            print(msg_info(f"CPT batch {batch_num} / {num_batches} candidates={len(batch)}"))
-
-            batch_chunks = self._finalize_chunk_candidates(batch)
-
-            # Update per-entry tracking
-            for candidate in batch:
-                eid = candidate["_entry_id"]
-                entry_processed_counts[eid] += 1
-            for chunk in batch_chunks:
-                entries_with_output.add(chunk["_entry_id"])
-
-            # Entries whose last candidate was in this batch and produced ≥1 chunk
-            newly_cached: List[str] = [
-                eid
-                for eid in entry_processed_counts
-                if entry_processed_counts[eid] >= entry_candidate_counts[eid]
-                and eid in entries_with_output
-                and eid not in already_cached
-            ]
-
-            # Strip internal fields before persisting
-            save_chunks = [{k: v for k, v in c.items() if not k.startswith("_")} for c in batch_chunks]
-
-            self._append_jsonl_records(all_chunks_path, save_chunks)
-            self._append_jsonl_record(
-                batch_status_path,
-                {
-                    "batch": batch_num,
-                    "input_records": len(batch),
-                    "output_chunks": len(save_chunks),
-                    "cached_ids": newly_cached,
-                },
+        worker_count = max(1, min(self.max_in_flight, len(chunk_candidates)))
+        print(
+            msg_info(
+                "Generating CPT with pipeline-pool async httpx pipeline: "
+                f"candidates={len(chunk_candidates)}, workers={worker_count}, "
+                f"max_in_flight={self.max_in_flight}, input_window_hint={self.pipeline_batch_size}"
             )
-            print(msg_info(f"Saved CPT batch status. output_chunks={len(save_chunks)}"))
+        )
 
-            if newly_cached:
-                self._append_processed_ids(cache_path, newly_cached)
-                already_cached.update(newly_cached)
+        async def _handle_result(result: CPTCandidateResult) -> None:
+            nonlocal failed_count, saved_count, status_counter
+            candidate = result.candidate
+            eid = candidate["_entry_id"]
+            chunk = result.chunk
+            failure = result.failure
+            save_chunks: List[Dict[str, Any]] = []
+            newly_cached: List[str] = []
 
-            chunks.extend(save_chunks)
+            async with output_lock:
+                entry_processed_counts[eid] += 1
 
-        # Log entries whose candidates were all processed but produced no output
+                if failure is not None:
+                    failed_count += 1
+                    entries_with_failure.add(eid)
+                    self._append_jsonl_record(failures_path, failure)
+                elif chunk is not None:
+                    public_chunk = {k: v for k, v in chunk.items() if not k.startswith("_")}
+                    chunk_text = str(public_chunk.get(self.text_key, ""))
+                    if not self.deduplicate or chunk_text not in seen_texts:
+                        if chunk_text:
+                            seen_texts.add(chunk_text)
+                        save_chunks.append(public_chunk)
+                        saved_count += 1
+                        entries_with_output.add(eid)
+
+                if (
+                    entry_processed_counts[eid] >= entry_candidate_counts[eid]
+                    and eid in entries_with_output
+                    and eid not in entries_with_failure
+                    and eid not in already_cached
+                ):
+                    newly_cached.append(eid)
+                    already_cached.add(eid)
+
+                self._append_jsonl_records(all_chunks_path, save_chunks)
+                if newly_cached:
+                    self._append_processed_ids(cache_path, newly_cached)
+
+                status_counter += 1
+                self._append_jsonl_record(
+                    batch_status_path,
+                    {
+                        "batch": status_counter,
+                        "input_records": 1,
+                        "output_chunks": len(save_chunks),
+                        "failed_chunks": 1 if failure is not None else 0,
+                        "cached_ids": newly_cached,
+                        "entry_id": eid,
+                        "chunk_index": candidate["_chunk_index"],
+                    },
+                )
+
+        async def _worker(worker_id: int) -> None:
+            while True:
+                candidate = await queue.get()
+                if candidate is None:
+                    queue.task_done()
+                    return
+
+                try:
+                    result = await self._process_candidate_async(candidate)
+                    await _handle_result(result)
+                    print(
+                        msg_info(
+                            f"CPT candidate complete worker_id={worker_id} "
+                            f"id={candidate['_entry_id']} chunk_index={candidate['_chunk_index']} "
+                            f"saved={saved_count} failed={failed_count} "
+                            f"in_flight={self.current_in_flight}"
+                        )
+                    )
+                except Exception as exc:
+                    failure = self._failure_record(candidate, "candidate", str(exc))
+                    await _handle_result(CPTCandidateResult(candidate=candidate, failure=failure))
+                    print(
+                        msg_error(
+                            f"CPT candidate failed worker_id={worker_id} "
+                            f"id={candidate['_entry_id']} chunk_index={candidate['_chunk_index']} "
+                            f"error={exc}"
+                        )
+                    )
+                finally:
+                    queue.task_done()
+
+        workers = [asyncio.create_task(_worker(worker_id)) for worker_id in range(worker_count)]
+        await queue.join()
+        for _ in workers:
+            await queue.put(None)
+        await asyncio.gather(*workers)
+
         for eid in entry_candidate_counts:
-            if eid not in entries_with_output:
+            if eid in entries_with_failure:
+                print(msg_info(f"Skipped cache for id={eid} because one or more chunks failed."))
+            elif eid not in entries_with_output:
                 print(msg_info(f"Skipped cache for id={eid} because no chunks were generated."))
 
-        return chunks
+        total_elapsed = time.monotonic() - start_time
+        print(
+            msg_info(
+                f"CPT pipeline-pool finished candidates={len(chunk_candidates)} "
+                f"saved={saved_count} failed={failed_count} elapsed={total_elapsed:.2f}s "
+                f"max_observed_in_flight={self.max_observed_in_flight}"
+            )
+        )
+        return chunks + self._load_jsonl_records(all_chunks_path)[len(chunks) :]
+
+    async def _process_candidate_async(self, candidate: Dict[str, Any]) -> CPTCandidateResult:
+        original_text = candidate["_original_text"]
+        bullet_text = ""
+        chunk_text = original_text
+        used_original_fallback = False
+
+        if self.copyright_mitigation:
+            try:
+                chunk_text, bullet_text, _ = await self._reconstruct_text_async(original_text)
+            except Exception as exc:
+                if self._uses_original_fallback():
+                    chunk_text = original_text
+                    bullet_text = ""
+                    used_original_fallback = True
+                else:
+                    failed_step = "to_bullet_points"
+                    if "reconstruction" in str(exc).lower():
+                        failed_step = "bullet_points_to_text"
+                    return CPTCandidateResult(
+                        candidate=candidate,
+                        failure=self._failure_record(candidate, failed_step, str(exc)),
+                    )
+
+        if (not chunk_text or chunk_text.strip() == "|||") and self._uses_original_fallback():
+            chunk_text = original_text
+            used_original_fallback = True
+
+        if not chunk_text or chunk_text.strip() == "|||" or len(chunk_text) < self.min_chars:
+            if self.copyright_mitigation and not self._uses_original_fallback():
+                failed_step = "to_bullet_points"
+                return CPTCandidateResult(
+                    candidate=candidate,
+                    failure=self._failure_record(candidate, failed_step, "Generated text was empty or too short."),
+                )
+            return CPTCandidateResult(candidate=candidate)
+
+        entry = candidate["_entry"]
+        mitigation_applied = self.copyright_mitigation and not used_original_fallback
+        chunk: Dict[str, Any] = {
+            self.text_key: chunk_text.strip(),
+            "id": str(entry.get(self.id_key, "")),
+            "title": candidate["_title"],
+            "source_file": str(entry.get("source_file", "")),
+            "chunk_index": candidate["_chunk_index"],
+            "copyright_mitigation": mitigation_applied,
+            "_entry_id": candidate["_entry_id"],
+        }
+        if mitigation_applied:
+            chunk["cpt_generator"] = self.inference_config.get("MODEL_NAME", "")
+        if self.keep_intermediate:
+            chunk["bullet_points"] = bullet_text
+            chunk["original_text"] = original_text
+        return CPTCandidateResult(candidate=candidate, chunk=chunk)
+
+    async def _reconstruct_text_async(self, text: str) -> Tuple[str, str, str]:
+        to_bullet_prompt = self.prompts.get("to_bullet_points_prompt")
+        to_text_prompt = self.prompts.get("bullet_points_to_text_prompt")
+        if not to_bullet_prompt or not to_text_prompt:
+            raise ValueError(
+                "to_bullet_points_prompt and bullet_points_to_text_prompt must be set when copyright_mitigation is true."
+            )
+
+        bullet_text = await self._infer_text_async(to_bullet_prompt.format(text=text), step="to_bullet_points")
+        if not bullet_text:
+            raise ValueError("Bullet point generation returned blank text.")
+        reconstructed_text = await self._infer_text_async(
+            to_text_prompt.format(text=bullet_text),
+            step="bullet_points_to_text",
+        )
+        if reconstructed_text and reconstructed_text.strip() != "|||":
+            return reconstructed_text.strip(), bullet_text.strip(), text
+        if not reconstructed_text:
+            raise ValueError("Text reconstruction returned blank text.")
+        return "", bullet_text.strip(), text
+
+    def _chat_payload(self, prompt: str) -> Dict[str, Any]:
+        payload = {
+            "model": self.inference_config.get("MODEL_NAME"),
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": int(self.inference_config.get("max_tokens", 2048)),
+            "temperature": self.inference_config.get("temperature", 0),
+            "top_p": self.inference_config.get("top_p", 1.0),
+            "stream": False,
+        }
+        if self.cpt_enable_thinking is not None:
+            payload["chat_template_kwargs"] = {
+                "enable_thinking": self.cpt_enable_thinking,
+            }
+        return payload
+
+    async def _post_chat_completion(self, payload: Dict[str, Any]) -> httpx.Response:
+        return await self.client.post("/chat/completions", json=payload)
+
+    def _parse_optional_bool(self, value: Any) -> Optional[bool]:
+        if value is None:
+            return None
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str):
+            normalized = value.strip().lower()
+            if normalized in {"true", "1", "yes", "on"}:
+                return True
+            if normalized in {"false", "0", "no", "off"}:
+                return False
+        return bool(value)
+
+    async def _increment_in_flight(self) -> int:
+        async with self._in_flight_lock:
+            self.current_in_flight += 1
+            self.max_observed_in_flight = max(self.max_observed_in_flight, self.current_in_flight)
+            return self.current_in_flight
+
+    async def _decrement_in_flight(self) -> int:
+        async with self._in_flight_lock:
+            self.current_in_flight = max(0, self.current_in_flight - 1)
+            return self.current_in_flight
+
+    def _retry_delay(self, attempt: int, response: Optional[httpx.Response] = None) -> float:
+        if response is not None:
+            retry_after = response.headers.get("retry-after")
+            if retry_after:
+                try:
+                    return min(float(retry_after), self.retry_max_delay)
+                except ValueError:
+                    pass
+        base_delay = self.wait_seconds * (2**attempt)
+        jitter = random.random() * self.retry_jitter_seconds
+        return min(base_delay + jitter, self.retry_max_delay)
+
+    def _retry_reason(self, exc: Exception) -> str:
+        if isinstance(exc, httpx.HTTPStatusError):
+            status_code = exc.response.status_code if exc.response is not None else "unknown"
+            body = exc.response.text[:200] if exc.response is not None else ""
+            return f"{type(exc).__name__}: status={status_code}, body={body}"
+        return f"{type(exc).__name__}: {exc}"
+
+    def _normalize_content(self, content: object) -> str:
+        if content is None:
+            return ""
+        if isinstance(content, str):
+            return content.strip()
+        if isinstance(content, list):
+            text_parts: List[str] = []
+            for part in content:
+                if isinstance(part, dict):
+                    value = part.get("text")
+                    if value:
+                        text_parts.append(str(value))
+                else:
+                    text_parts.append(str(part))
+            return "".join(text_parts).strip()
+        return str(content).strip()
+
+    async def _infer_text_async(self, prompt: str, step: str) -> str:
+        payload = self._chat_payload(prompt)
+        last_exc: Optional[Exception] = None
+
+        for attempt in range(self.max_retries):
+            try:
+                async with self.request_semaphore:
+                    await self._increment_in_flight()
+                    try:
+                        response = await self._post_chat_completion(payload)
+                    finally:
+                        await self._decrement_in_flight()
+
+                if response.status_code in RETRYABLE_STATUS_CODES:
+                    raise httpx.HTTPStatusError(
+                        f"Retryable status code: {response.status_code}",
+                        request=response.request,
+                        response=response,
+                    )
+                response.raise_for_status()
+                data = response.json()
+                content = data.get("choices", [{}])[0].get("message", {}).get("content")
+                normalized = self._normalize_content(content)
+                if normalized:
+                    return normalized
+                raise ValueError(f"{step} returned blank text.")
+
+            except httpx.HTTPStatusError as exc:
+                last_exc = exc
+                status_code = exc.response.status_code if exc.response is not None else None
+                if status_code not in RETRYABLE_STATUS_CODES:
+                    body = exc.response.text[:500] if exc.response is not None else ""
+                    print(msg_error(f"Non-retryable HTTP error: status={status_code}, body={body}"))
+                    return ""
+            except (
+                httpx.ConnectError,
+                httpx.ConnectTimeout,
+                httpx.PoolTimeout,
+                httpx.ReadError,
+                httpx.ReadTimeout,
+                httpx.RemoteProtocolError,
+                json.JSONDecodeError,
+                ValueError,
+            ) as exc:
+                last_exc = exc
+            except Exception as exc:
+                print(msg_error(f"Inference failed with unexpected error: {exc}"))
+                return ""
+
+            if attempt < self.max_retries - 1:
+                response = last_exc.response if isinstance(last_exc, httpx.HTTPStatusError) else None
+                delay = self._retry_delay(attempt, response)
+                reason = self._retry_reason(last_exc) if last_exc is not None else "unknown"
+                print(msg_debug(f"Retrying CPT inference ({attempt + 1}/{self.max_retries}) after {delay:.2f}s. reason={reason}"))
+                await asyncio.sleep(delay)
+
+        print(msg_error(f"Inference failed after {self.max_retries} attempts. last_error={last_exc}"))
+        return ""
+
+    def _failure_record(self, candidate: Dict[str, Any], failed_step: str, error: str) -> Dict[str, Any]:
+        entry = candidate["_entry"]
+        return {
+            "id": str(entry.get(self.id_key, "")),
+            "entry_id": candidate["_entry_id"],
+            "chunk_index": candidate["_chunk_index"],
+            "source_file": str(entry.get("source_file", "")),
+            "failed": True,
+            "failed_step": failed_step,
+            "error": error,
+            "original_text": candidate["_original_text"],
+            "cpt_generator": self.inference_config.get("MODEL_NAME", ""),
+        }
 
     def _prepare_chunk_candidates(self, entries: List[Dict]) -> List[Dict]:
-        """Stage 1: normalise text and split every entry into chunk candidates.
-
-        No LLM calls are made here.  Returns a flat list of candidate dicts
-        with internal keys prefixed by ``_`` (``_entry_id``, ``_entry``,
-        ``_title``, ``_chunk_index``, ``_original_text``).
-        """
         candidates: List[Dict] = []
         for entry in entries:
             entry_id = self._entry_cache_id(entry)
@@ -228,56 +571,6 @@ class CPTDatasetPipeline:
                 )
         return candidates
 
-    def _finalize_chunk_candidates(self, candidates: List[Dict]) -> List[Dict]:
-        """Stage 2: run LLM reconstruction (if enabled) and assemble chunk dicts.
-
-        Each returned dict contains the public chunk fields plus a temporary
-        ``_entry_id`` field used by the caller for cache tracking.  Callers
-        must strip keys starting with ``_`` before persisting to disk.
-        """
-        if not candidates:
-            return []
-
-        original_texts = [c["_original_text"] for c in candidates]
-
-        if self.copyright_mitigation:
-            reconstructed = self._reconstruct_texts(original_texts)
-        else:
-            reconstructed = [(text, "", text) for text in original_texts]
-
-        seen_texts: set[str] = set()
-        chunks: List[Dict] = []
-        for candidate, (chunk_text, bullet_text, original_text) in zip(candidates, reconstructed):
-            if len(chunk_text) < self.min_chars:
-                continue
-            if self.deduplicate:
-                if chunk_text in seen_texts:
-                    continue
-                seen_texts.add(chunk_text)
-
-            entry = candidate["_entry"]
-            title = candidate["_title"]
-            chunk_index = candidate["_chunk_index"]
-            entry_id = candidate["_entry_id"]
-
-            chunk: Dict = {
-                self.text_key: chunk_text,
-                "id": str(entry.get(self.id_key, "")),
-                "title": title,
-                "source_file": str(entry.get("source_file", "")),
-                "chunk_index": chunk_index,
-                "copyright_mitigation": self.copyright_mitigation,
-                "_entry_id": entry_id,
-            }
-            if self.copyright_mitigation:
-                chunk["cpt_generator"] = self.inference_config.get("MODEL_NAME", "")
-            if self.keep_intermediate:
-                chunk["bullet_points"] = bullet_text
-                chunk["original_text"] = original_text
-            chunks.append(chunk)
-
-        return chunks
-
     def _load_prompts(self, prompts_settings: List[Dict]) -> Dict[str, str]:
         prompts_dict: Dict[str, str] = {}
         for prompt_path_dict in prompts_settings:
@@ -285,83 +578,6 @@ class CPTDatasetPipeline:
             with open(prompt_path, "r", encoding="utf-8") as f:
                 prompts_dict[key] = f.read()
         return prompts_dict
-
-    def _infer_text(self, prompt: str) -> str:
-        user_content = [{"type": "text", "text": prompt}]
-        max_tokens = int(self.inference_config.get("max_tokens", 2048))
-        temperature = self.inference_config.get("temperature", 0)
-        top_p = self.inference_config.get("top_p", 1.0)
-
-        last_exc = None
-        for i in range(self.max_retries):
-            try:
-                response = self.client.chat.completions.create(
-                    model=self.inference_config.get("MODEL_NAME"),
-                    messages=[{"role": "user", "content": user_content}],
-                    max_tokens=max_tokens,
-                    temperature=temperature,
-                    top_p=top_p,
-                )
-                response_content = response.choices[0].message.content
-                if response_content is None:
-                    last_exc = RuntimeError("Model returned empty content (None).")
-                    raise last_exc
-                if isinstance(response_content, str):
-                    normalized = response_content.strip()
-                elif isinstance(response_content, list):
-                    normalized = "".join(
-                        str(part.get("text", "")) if isinstance(part, dict) else str(part)
-                        for part in response_content
-                    ).strip()
-                else:
-                    normalized = str(response_content).strip()
-                if normalized:
-                    return normalized
-                last_exc = RuntimeError("Model returned blank text.")
-            except Exception as exc:
-                last_exc = exc
-                if i < self.max_retries - 1:
-                    sleep = min((self.wait_seconds * (2 ** i)) + random.random() * 0.2, 30.0)
-                    time.sleep(sleep)
-                    if isinstance(exc, (httpx.ReadTimeout, httpx.ConnectTimeout, httpx.RemoteProtocolError)):
-                        print(msg_debug(f"Retrying due to network error. Attempt {i + 1}/{self.max_retries}."))
-                    continue
-        print(msg_debug(f"Inference failed after {self.max_retries} attempts. last_error={last_exc}"))
-        return ""
-
-    def _infer_texts(self, prompts: List[str]) -> List[str]:
-        if not prompts:
-            return []
-        max_workers = max(1, min(self.batch_size, len(prompts)))
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            return list(executor.map(self._infer_text, prompts))
-
-    def _reconstruct_texts(self, texts: List[str]) -> List[Tuple[str, str, str]]:
-        if not texts:
-            return []
-
-        to_bullet_prompt = self.prompts.get("to_bullet_points_prompt")
-        to_text_prompt = self.prompts.get("bullet_points_to_text_prompt")
-        if not to_bullet_prompt or not to_text_prompt:
-            raise ValueError(
-                "to_bullet_points_prompt and bullet_points_to_text_prompt must be set when copyright_mitigation is true."
-            )
-
-        print(msg_info("now generating BULLET POINTS..."))
-        bullet_prompts = [to_bullet_prompt.format(text=text) for text in texts]
-        bullet_texts = self._infer_texts(bullet_prompts)
-
-        print(msg_info("now reconstructing TEXT..."))
-        reconstruct_prompts = [to_text_prompt.format(text=bullet_text) for bullet_text in bullet_texts]
-        reconstructed_texts = self._infer_texts(reconstruct_prompts)
-
-        results: List[Tuple[str, str, str]] = []
-        for original_text, bullet_text, reconstructed_text in zip(texts, bullet_texts, reconstructed_texts):
-            if reconstructed_text and reconstructed_text.strip() != "|||":
-                results.append((reconstructed_text.strip(), bullet_text.strip(), original_text))
-            else:
-                results.append(("", bullet_text.strip(), original_text))
-        return results
 
     def _collect_source_files(self, source_path: Path) -> List[Path]:
         if source_path.is_file():
@@ -437,6 +653,9 @@ class CPTDatasetPipeline:
                     records.append(obj)
         return records
 
+    def _count_jsonl_records(self, file_path: Path) -> int:
+        return len(self._load_jsonl_records(file_path))
+
     def _entry_cache_id(self, entry: Dict) -> str:
         entry_id = entry.get(self.id_key)
         if entry_id is not None:
@@ -477,12 +696,6 @@ class CPTDatasetPipeline:
         with open(save_path, "a", encoding="utf-8") as f:
             json.dump(record, f, ensure_ascii=False)
             f.write("\n")
-
-    def _build_chunks(self, entries: List[Dict]) -> List[Dict]:
-        """Build chunks for a list of entries (delegates to the two-stage pipeline)."""
-        candidates = self._prepare_chunk_candidates(entries)
-        raw_chunks = self._finalize_chunk_candidates(candidates)
-        return [{k: v for k, v in c.items() if not k.startswith("_")} for c in raw_chunks]
 
     def _normalize_text(self, text: str) -> str:
         text = text.replace("\r\n", "\n").replace("\r", "\n")
