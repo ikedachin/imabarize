@@ -1,0 +1,11 @@
+# ------------------------------------
+# Upload settings
+# ------------------------------------
+# main_upload_dataset.py が --settings_path で読み込む設定です。
+# 使用するキーは output_path のみで、アップロード対象のデータセットディレクトリを指します。
+#
+# CPT / QA / GRPO のいずれかの生成済みデータセットをアップロードする場合は、
+# このファイルの代わりに、生成時に使った settings yaml
+# （例: create_cpt_dataset_settings.yaml, create_imabari_qa_settings.yaml,
+#       create_grpo_qa_settings.yaml）をそのまま --settings_path に渡しても構いません。
+output_path: ./test_output/cpt/wiki

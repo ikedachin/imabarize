@@ -73,7 +73,7 @@ wait_seconds: 5
 # ------------------------------------
 # httpx async pipeline-pool settings
 # ------------------------------------
-# main_create_cpt_dataset_httpx_pipeline_pool.py で使う任意設定です。
+# main_create_cpt_dataset.py で使う任意設定です。
 # max_in_flight はパイプライン全体で同時に OpenAI 互換 API へ投げる最大リクエスト数です。
 max_in_flight: 8
 pipeline_batch_size: 32

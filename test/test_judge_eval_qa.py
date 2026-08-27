@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 import httpx
 
-from pipelines.judge_eval_qa_httpx_pipeline_pool import (
+from pipelines.judge_eval_qa import (
     JudgeEvalQAPipeline,
     entry_cache_key,
     is_entry_processed,

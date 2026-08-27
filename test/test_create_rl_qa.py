@@ -8,7 +8,7 @@ from typing import Any, Dict, List
 
 import httpx
 
-from pipelines.create_rl_qa_httpx_pipeline_pool import (
+from pipelines.create_rl_qa import (
     RLQAPipeline,
     entry_cache_key,
     is_entry_processed,

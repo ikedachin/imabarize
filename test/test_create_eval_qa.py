@@ -1,6 +1,6 @@
 import unittest
 
-from main_create_eval_qa_httpx_pipeline_pool import parse_sample_size, select_sampled_items
+from main_create_eval_qa import parse_sample_size, select_sampled_items
 
 
 class EvalQASamplingTests(unittest.TestCase):

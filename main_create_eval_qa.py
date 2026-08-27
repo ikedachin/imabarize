@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from commons.util_settings import load_settings
 from commons.utils_msg import msg_debug, msg_error, msg_info, msg_success
-from main_create_imabari_qa_httpx_pipeline_pool import (
+from main_create_imabari_qa import (
     collect_source_files,
     entry_cache_key,
     get_parent_book_name,
@@ -16,7 +16,7 @@ from main_create_imabari_qa_httpx_pipeline_pool import (
     load_json_entries,
     load_processed_cache_keys,
 )
-from pipelines.create_qa_model_httpx_pipeline_pool import QAPipeline
+from pipelines.create_qa_model import QAPipeline
 
 
 def parse_sample_size(value: Any) -> Optional[int]:
@@ -295,7 +295,7 @@ if __name__ == "__main__":
         "-p",
         "--settings_path",
         nargs="?",
-        default="./yamls/eval_qa_settings_format.yaml",
+        default="./yamls/create_eval_qa_settings_format.yaml",
         help="Path to the settings YAML file",
     )
     parser.add_argument(

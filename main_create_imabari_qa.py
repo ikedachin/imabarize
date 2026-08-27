@@ -1,9 +1,10 @@
 import argparse
+import asyncio
 import json
 import sys
 import uuid
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Set, Tuple
 
 import tqdm
 
@@ -76,7 +77,25 @@ def load_json_entries(file_path: Path) -> List[dict]:
     return entries
 
 
-def process_text_files(
+def entry_cache_key(entry_id: str, chunk_index: Any) -> str:
+    if chunk_index is None:
+        return entry_id
+    return f"{entry_id}\t{chunk_index}"
+
+
+def load_processed_cache_keys(cache_file: Path) -> Set[str]:
+    if not cache_file.exists():
+        return set()
+    with open(cache_file, "r", encoding="utf-8") as f:
+        return set(line.strip() for line in f if line.strip())
+
+
+def is_entry_processed(entry_id: str, chunk_index: Any, processed_keys: Set[str]) -> bool:
+    key = entry_cache_key(entry_id, chunk_index)
+    return key in processed_keys or entry_id in processed_keys
+
+
+async def process_text_files(
     pipeline: QAPipeline,
     text_files: List[Path],
     batch_size: int,
@@ -92,47 +111,56 @@ def process_text_files(
     for file_path in text_files:
         parent_name = get_parent_book_name(file_path)
         parent_outputs[parent_name] = output_dir / f"{parent_name}.jsonl"
-    # for output_jsonl in set(parent_outputs.values()):
-    #     if output_jsonl.exists():
-    #         output_jsonl.unlink()
 
-    for start in tqdm.tqdm(range(0, len(text_files), batch_size), desc="Text batches"):
-        if (start + 1) < start_index:
-            print(msg_info(f"Skipping text batch starting at {start + 1} for resume."))
+    source_files = text_files[start_index - 1 :] if start_index > 1 else text_files
+    if start_index > 1:
+        print(msg_info(f"Skipping first {start_index - 1} text file(s) for resume."))
+
+    batch_texts: List[str] = []
+    batch_sources: List[Path] = []
+    batch_parents: List[str] = []
+    for file_path in tqdm.tqdm(source_files, desc="Text files"):
+        try:
+            text = file_path.read_text(encoding="utf-8")
+        except Exception as exc:
+            print(msg_error(f"Failed to read {file_path}: {exc}"))
             continue
-        end = min(start + batch_size, len(text_files))
-        batch_paths = text_files[start:end]
-        print(msg_info(f"Text batch {start // batch_size + 1}-{end} / {len(text_files)}"))
-
-        batch_texts: List[str] = []
-        batch_sources: List[Path] = []
-        batch_parents: List[str] = []
-        for file_path in batch_paths:
-            try:
-                text = file_path.read_text(encoding="utf-8")
-            except Exception as exc:
-                print(msg_error(f"Failed to read {file_path}: {exc}"))
-                continue
-            if not text.strip():
-                print(msg_debug(f"Skipping empty file: {file_path.name}"))
-                continue
-            batch_texts.append(text)
-            batch_sources.append(file_path)
-            batch_parents.append(get_parent_book_name(file_path))
-
-        if not batch_texts:
+        if not text.strip():
+            print(msg_debug(f"Skipping empty file: {file_path.name}"))
             continue
+        batch_texts.append(text)
+        batch_sources.append(file_path)
+        batch_parents.append(get_parent_book_name(file_path))
 
-        results = pipeline.create_qa_batch(batch_texts, batch_size=batch_size)
-        for result, source_path, parent_name in zip(results, batch_sources, batch_parents):
+    if not batch_texts:
+        return
+
+    async def on_result(item_id: int, result: Dict[str, Any]) -> None:
+        source_path = batch_sources[item_id]
+        parent_name = batch_parents[item_id]
+        output_jsonl = parent_outputs[parent_name]
+        if result.get("failed"):
+            failure_path = output_jsonl.with_suffix(".failures.jsonl")
             result["source_files"] = [str(source_path.name)]
             result["id"] = str(uuid.uuid4())
-            output_jsonl = parent_outputs[parent_name]
-            pipeline._append_jsonl(output_jsonl, result)
-            print(msg_info(f"Saved QA to: {output_jsonl}"))
+            result["chunk_index"] = None
+            pipeline.append_failure_jsonl(failure_path, result)
+            print(msg_error(f"Failed to create QA for: {source_path}. Saved failure to: {failure_path}"))
+            return
+        result["source_files"] = [str(source_path.name)]
+        result["id"] = str(uuid.uuid4())
+        result["chunk_index"] = None
+        pipeline.append_jsonl(output_jsonl, result)
+        print(msg_info(f"Saved QA to: {output_jsonl}"))
+
+    await pipeline.create_qa_batch_async(
+        batch_texts,
+        batch_size=batch_size,
+        on_result=on_result,
+    )
 
 
-def process_json_files(
+async def process_json_files(
     pipeline: QAPipeline,
     json_files: List[Path],
     target_key: str,
@@ -144,68 +172,95 @@ def process_json_files(
 
     print(msg_success(f"Processing {len(json_files)} JSON/JSONL file(s)."))
 
-    # # ここにキャッシュファイルを読んで、処理ずみのIDのデータを削除する処理を入れる
     output_path = Path(pipeline.settings.get("output_path", "./output")).expanduser().resolve()
     output_path.mkdir(parents=True, exist_ok=True)
 
     for file_path in json_files:
         entries = load_json_entries(file_path)
+        for row_index, entry in enumerate(entries):
+            entry["_qa_entry_id"] = str(entry.get("id") or f"{file_path.stem}:{row_index}")
 
-        # ここで、キャッシュに基づいて、処理ずみのIDを持つエントリを削除する処理を入れる
-        # 例えば、cacheに{"book_name": [id1, id2, ...]}のようなデータがあるとすると、book_nameに対応するIDのエントリをentriesから削除する処理を入れる。
         book_name = get_parent_book_name(file_path)
         cache_file = output_path / f"cache_{book_name}_{file_path.stem}.txt"
 
-        if cache_file.exists():
-            with open(cache_file, "r", encoding="utf-8") as f:
-                processed_ids = set(line.strip() for line in f if line.strip())
-                print(msg_info(f"Loaded {len(processed_ids)} processed IDs from cache for {file_path.name}."))
-        else:
-            processed_ids = set()
+        processed_keys = load_processed_cache_keys(cache_file)
+        print(msg_info(f"Loaded {len(processed_keys)} processed cache keys from cache for {file_path.name}."))
+
         print(msg_info(f"Before filtering, {len(entries)} entries in {file_path.name}."))
-        entries = [entry for entry in entries if entry.get("id") not in processed_ids]
+        entries = [
+            entry
+            for entry in entries
+            if not is_entry_processed(
+                str(entry["_qa_entry_id"]),
+                entry.get("chunk_index"),
+                processed_keys,
+            )
+        ]
         print(msg_info(f"After filtering, {len(entries)} entries to process in {file_path.name}."))
 
         if not entries:
             print(msg_error(f"No entries found in {file_path}."))
             continue
+
         print(msg_info(f"Loaded {len(entries)} entries from {file_path.name}."))
 
+        if start_index > 1:
+            print(msg_info(f"Skipping first {start_index - 1} row(s) in {file_path.name} for resume."))
+            entries = entries[start_index - 1 :]
+
         output_jsonl = output_path / f"{file_path.stem}.jsonl"
-        for start in tqdm.tqdm(range(0, len(entries), batch_size), desc=f"Entries / {file_path.name}"):
-            if (start + 1) < start_index:
-                print(msg_info(f"Skipping {file_path.name} rows {start + 1}-{start + batch_size} for resume."))
+        batch_texts: List[str] = []
+        ids: List[str] = []
+        chunk_indexes: List[Any] = []
+        cache_keys: List[str] = []
+        for entry in tqdm.tqdm(entries, desc=f"Entries / {file_path.name}"):
+            value = entry.get(target_key)
+            if not value or not isinstance(value, str):
+                print(msg_debug(f"Entry missing target key {target_key} in {file_path.name}: {entry}"))
                 continue
-            end = min(start + batch_size, len(entries))
-            print(msg_info(f"JSON batch {start // batch_size + 1} rows {start + 1}-{end} / {len(entries)}"))
+            entry_id = str(entry["_qa_entry_id"])
+            chunk_index = entry.get("chunk_index")
+            batch_texts.append(value)
+            ids.append(entry_id)
+            chunk_indexes.append(chunk_index)
+            cache_keys.append(entry_cache_key(entry_id, chunk_index))
 
-            batch_texts: List[str] = []
-            ids = []
-            for entry in entries[start:end]:
-                value = entry.get(target_key)
-                if not value or not isinstance(value, str):
-                    print(msg_debug(f"Entry missing target key {target_key} in {file_path.name}: {entry}"))
-                    continue
-                batch_texts.append(value)
-                ids.append(entry.get("id", str(uuid.uuid4())))
+        if not batch_texts:
+            continue
 
-            if not batch_texts:
-                continue
-
-            results = pipeline.create_qa_batch(batch_texts, batch_size=batch_size)
-            
-            print(msg_debug(f"Batch results for {results}"))
-            
-            for result, entry_id in zip(results, ids):
+        async def on_result(item_id: int, result: Dict[str, Any]) -> None:
+            entry_id = ids[item_id]
+            chunk_index = chunk_indexes[item_id]
+            if result.get("failed"):
+                failure_path = output_jsonl.with_suffix(".failures.jsonl")
                 result["source_files"] = [str(file_path.name)]
                 result["id"] = entry_id
-                pipeline.append_jsonl(output_jsonl, result)
-                pipeline.add_cache(entry_id, f"{book_name}_{file_path.stem}")
+                result["chunk_index"] = chunk_index
+                pipeline.append_failure_jsonl(failure_path, result)
+                print(
+                    msg_error(
+                        f"Failed to create QA for entry_id={entry_id} chunk_index={chunk_index}. "
+                        f"Saved failure to: {failure_path}"
+                    )
+                )
+                return
+            result["source_files"] = [str(file_path.name)]
+            result["id"] = entry_id
+            result["chunk_index"] = chunk_index
+            pipeline.append_jsonl(output_jsonl, result)
+            pipeline.add_cache(cache_keys[item_id], f"{book_name}_{file_path.stem}")
+
+        results = await pipeline.create_qa_batch_async(
+            batch_texts,
+            batch_size=batch_size,
+            on_result=on_result,
+        )
+        print(msg_debug(f"Batch results count: {len(results)}"))
 
         print(msg_info(f"Saved QA to: {output_jsonl}"))
 
 
-def main(
+async def main(
     settings_path: str | None,
     source_path: str | None,
     target_key: str | None,
@@ -221,8 +276,6 @@ def main(
         sys.exit(1)
     source = Path(source_path).expanduser().resolve()
 
-    batch_size = int(settings.get("batch_size", 1))
-
     text_files, json_files = collect_source_files(source)
     if not text_files and not json_files:
         print(msg_error(f"No supported files were found for {source}."), file=sys.stderr)
@@ -232,25 +285,36 @@ def main(
         print(msg_error("target_key is required when processing JSON files."), file=sys.stderr)
         sys.exit(1)
 
-    # text_filesとjson_filesを処理する前に、QAPipelineを初期化しておく
-    # ここではjsonlファイルのみの対応（20260403）
-
     pipeline = QAPipeline(settings)
-
-    process_text_files(pipeline, text_files, batch_size, start_index)
-    if target_key:
-        process_json_files(pipeline, json_files, target_key, batch_size, start_index)
+    batch_size = int(
+        settings.get(
+            "pipeline_batch_size",
+            max(int(settings.get("batch_size", 1)), pipeline.max_in_flight * 4),
+        )
+    )
+    print(
+        msg_info(
+            f"Async request concurrency max_in_flight={pipeline.max_in_flight}, "
+            f"input_window_hint={batch_size}"
+        )
+    )
+    try:
+        await process_text_files(pipeline, text_files, batch_size, start_index)
+        if target_key:
+            await process_json_files(pipeline, json_files, target_key, batch_size, start_index)
+    finally:
+        await pipeline.aclose()
 
 
 if __name__ == "__main__":
     print(msg_success("Imabari Q&A Creation Pipeline Started"))
 
-    parser = argparse.ArgumentParser(description="Create Q&A from text, markdown, and json files.")
+    parser = argparse.ArgumentParser(description="Create Q&A from text, markdown, and json files (httpx async).")
     parser.add_argument(
         "-p",
         "--settings_path",
         nargs="?",
-        default="./yamls/create_qa_settings.yaml",
+        default="./yamls/create_imabari_qa_settings_format.yaml",
         help="Path to the settings YAML file",
     )
     parser.add_argument(
@@ -275,14 +339,15 @@ if __name__ == "__main__":
         help="Start index for resuming processing",
     )
 
-
     args = parser.parse_args()
 
-    main(
-        settings_path=args.settings_path,
-        source_path=args.source,
-        target_key=args.target_key,
-        start_index=args.start_index,
+    asyncio.run(
+        main(
+            settings_path=args.settings_path,
+            source_path=args.source,
+            target_key=args.target_key,
+            start_index=args.start_index,
+        )
     )
 
     print(msg_success("Imabari Q&A Creation Pipeline Completed"))

@@ -5,7 +5,7 @@ from pathlib import Path
 
 from commons.util_settings import load_settings
 from commons.utils_msg import msg_error, msg_info, msg_success
-from pipelines.judge_eval_qa_httpx_pipeline_pool import JudgeEvalQAPipeline
+from pipelines.judge_eval_qa import JudgeEvalQAPipeline
 
 
 async def main(
