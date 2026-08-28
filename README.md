@@ -62,8 +62,15 @@ Q&A 生成、今治弁変換、CPT データセット生成は OpenAI 互換 API
 - `test_output/`: 出力先サンプル
 
 ## 成果物の例
+### CPT set
+[imabari_wiki_cpt_v3](https://huggingface.co/datasets/ikedachin/imabari_wiki_cpt_v3)  
+
+
+### QA set
 [JaQuAD_imabari_v1](https://huggingface.co/datasets/ikedachin/JaQuAD_imabari_v1)  
 [JaQuAD_imabari_v2](https://huggingface.co/datasets/ikedachin/JaQuAD_imabari_v2)
+[imabari_wiki_qa_v3](https://huggingface.co/datasets/ikedachin/imabari_wiki_cpt_v3)
+[imabari_wiki_qa_v4](https://huggingface.co/datasets/ikedachin/imabari_wiki_cpt_v4)
 
 
 ## セットアップ
