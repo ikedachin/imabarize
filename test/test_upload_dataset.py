@@ -114,6 +114,30 @@ class UploadDatasetTests(unittest.TestCase):
         self.assertEqual(counts, {"train.jsonl": 2, "validation.jsonl": 1})
         self.assertEqual([record for record in records if set(record) != {"text"}], [])
 
+    def test_split_upload_includes_dataset_readme(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            dataset_dir = tmp_path / "dataset"
+            work_dir = tmp_path / "work"
+            write_jsonl(
+                dataset_dir / "all.jsonl",
+                [{"text": "one"}, {"text": "two"}],
+            )
+            readme_path = dataset_dir / "README.md"
+            readme_path.write_text("# Dataset card\n", encoding="utf-8")
+
+            upload_files, _ = _prepare_split_upload_files(
+                dataset_dir=dataset_dir,
+                work_dir=work_dir,
+                dataset_kind="qa",
+                exclude_upload_keys=DEFAULT_EXCLUDE_UPLOAD_KEYS,
+                validation_ratio=0.5,
+                split_seed=42,
+            )
+
+        files_by_repo_path = {upload_file.path_in_repo: upload_file.path for upload_file in upload_files}
+        self.assertEqual(files_by_repo_path["README.md"], readme_path)
+
 
 if __name__ == "__main__":
     unittest.main()

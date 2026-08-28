@@ -184,7 +184,7 @@ python main_create_eval_qa.py \
   -n 50
 ```
 
-`sample_size` を `null` または 0 以下にすると全件処理します。出力先は YAML の `output_path` で指定します。出力レコードは `id` / `chunk_index` / `source_files` / `question` / `thinking` / `answer` / `eval` / `qa_generator` / `messages` を持つ既存 Q&A 互換 JSONL です。JSON/JSONL 入力では `id` と `chunk_index` を組み合わせた cache key で再実行済みレコードをスキップします。
+`sample_size` を `null` または 0 以下にすると全件処理します。出力先は YAML の `output_path` で指定します。出力レコードは `qa_id` / `id` / `chunk_index` / `source_files` / `question` / `thinking` / `answer` / `eval` / `qa_generator` / `messages` を持つ既存 Q&A 互換 JSONL です。`qa_id` はQ&Aレコードの生成時に割り当てる一意な UUIDv4 です。同じ `id + chunk_index` や同じ内容のレコードも、それぞれ異なる `qa_id` を持ちます。JSON/JSONL 入力では `id` と `chunk_index` を組み合わせた cache key で再実行済みレコードをスキップします。
 
 ### C. LLM-as-a-Judge 評価
 

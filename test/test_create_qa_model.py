@@ -3,6 +3,7 @@ import json
 import tempfile
 import time
 import unittest
+import uuid
 from pathlib import Path
 from typing import Any, Dict, List
 
@@ -12,6 +13,8 @@ from main_create_imabari_qa import (
     entry_cache_key,
     is_entry_processed,
     load_processed_cache_keys,
+    new_qa_id,
+    process_json_files,
 )
 from pipelines.create_qa_model import QAPipeline
 
@@ -240,6 +243,14 @@ class PipelinePoolTests(unittest.IsolatedAsyncioTestCase):
 
 
 class PipelinePoolResumeTests(unittest.TestCase):
+    def test_new_qa_id_is_a_unique_uuid4(self) -> None:
+        first = uuid.UUID(new_qa_id())
+        second = uuid.UUID(new_qa_id())
+
+        self.assertEqual(first.version, 4)
+        self.assertEqual(second.version, 4)
+        self.assertNotEqual(first, second)
+
     def test_entry_cache_key_uses_id_and_chunk_index(self) -> None:
         self.assertEqual(entry_cache_key("article-1", 3), "article-1\t3")
         self.assertEqual(entry_cache_key("article-1", None), "article-1")
@@ -291,6 +302,36 @@ class PipelinePoolResumeTests(unittest.TestCase):
             keys = load_processed_cache_keys(cache_path)
 
         self.assertEqual(keys, {"article-1\t0", "article-2"})
+
+    def test_json_output_does_not_include_internal_item_id(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            tmp_path = Path(tmpdir)
+            source_path = tmp_path / "source.jsonl"
+            source_path.write_text(
+                json.dumps({"id": "article-1", "chunk_index": 0, "text": "fast"}) + "\n",
+                encoding="utf-8",
+            )
+            pipeline = FakePipelinePool(tmp_path, max_in_flight=1)
+            try:
+                asyncio.run(
+                    process_json_files(
+                        pipeline=pipeline,
+                        json_files=[source_path],
+                        target_key="text",
+                        batch_size=1,
+                        start_index=0,
+                    )
+                )
+            finally:
+                asyncio.run(pipeline.aclose())
+
+            output_path = pipeline.output_dir / "source.jsonl"
+            saved = json.loads(output_path.read_text(encoding="utf-8").strip())
+
+        self.assertNotIn("item_id", saved)
+        self.assertEqual(uuid.UUID(saved["qa_id"]).version, 4)
+        self.assertEqual(saved["id"], "article-1")
+        self.assertEqual(saved["chunk_index"], 0)
 
 
 if __name__ == "__main__":

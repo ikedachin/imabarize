@@ -16,6 +16,10 @@ TEXT_EXTENSIONS = {".md", ".txt"}
 JSON_EXTENSIONS = {".json", ".jsonl"}
 
 
+def new_qa_id() -> str:
+    return str(uuid.uuid4())
+
+
 def collect_source_files(source_path: Path) -> Tuple[List[Path], List[Path]]:
     text_files: List[Path] = []
     json_files: List[Path] = []
@@ -139,17 +143,17 @@ async def process_text_files(
         source_path = batch_sources[item_id]
         parent_name = batch_parents[item_id]
         output_jsonl = parent_outputs[parent_name]
+        result.pop("item_id", None)
+        entry_id = str(uuid.uuid4())
+        result["source_files"] = [str(source_path.name)]
+        result["id"] = entry_id
+        result["chunk_index"] = None
+        result["qa_id"] = new_qa_id()
         if result.get("failed"):
             failure_path = output_jsonl.with_suffix(".failures.jsonl")
-            result["source_files"] = [str(source_path.name)]
-            result["id"] = str(uuid.uuid4())
-            result["chunk_index"] = None
             pipeline.append_failure_jsonl(failure_path, result)
             print(msg_error(f"Failed to create QA for: {source_path}. Saved failure to: {failure_path}"))
             return
-        result["source_files"] = [str(source_path.name)]
-        result["id"] = str(uuid.uuid4())
-        result["chunk_index"] = None
         pipeline.append_jsonl(output_jsonl, result)
         print(msg_info(f"Saved QA to: {output_jsonl}"))
 
@@ -231,11 +235,13 @@ async def process_json_files(
         async def on_result(item_id: int, result: Dict[str, Any]) -> None:
             entry_id = ids[item_id]
             chunk_index = chunk_indexes[item_id]
+            result.pop("item_id", None)
+            result["source_files"] = [str(file_path.name)]
+            result["id"] = entry_id
+            result["chunk_index"] = chunk_index
+            result["qa_id"] = new_qa_id()
             if result.get("failed"):
                 failure_path = output_jsonl.with_suffix(".failures.jsonl")
-                result["source_files"] = [str(file_path.name)]
-                result["id"] = entry_id
-                result["chunk_index"] = chunk_index
                 pipeline.append_failure_jsonl(failure_path, result)
                 print(
                     msg_error(
@@ -244,9 +250,6 @@ async def process_json_files(
                     )
                 )
                 return
-            result["source_files"] = [str(file_path.name)]
-            result["id"] = entry_id
-            result["chunk_index"] = chunk_index
             pipeline.append_jsonl(output_jsonl, result)
             pipeline.add_cache(cache_keys[item_id], f"{book_name}_{file_path.stem}")
 

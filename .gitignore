@@ -1,6 +1,7 @@
 # environment
 /.venv
 uv.lock
+.env
 
 # pycache
 __pycache__/
@@ -25,3 +26,6 @@ test_output/imabari_qa/*
 
 wiki/*
 wiki_test/*
+
+# Huggingface uploader
+upload_imabari_qa_v4_to_huggingface.ipynb

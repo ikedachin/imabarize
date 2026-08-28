@@ -159,6 +159,9 @@ def _prepare_split_upload_files(
         UploadFile(path=train_path, path_in_repo="train.jsonl"),
         UploadFile(path=validation_path, path_in_repo="validation.jsonl"),
     ]
+    readme_path = dataset_dir / "README.md"
+    if readme_path.is_file():
+        upload_files.append(UploadFile(path=readme_path, path_in_repo="README.md"))
     return upload_files, counts
 
 
