@@ -184,6 +184,10 @@ class QAPipeline:
             payload["chat_template_kwargs"] = {
                 "enable_thinking": self.thinking_enabled_by_step[step],
             }
+        if step == 5:
+            payload["max_tokens"] = 16
+            payload["temperature"] = 0
+            payload["top_p"] = 1.0
         return payload
 
     async def _post_chat_completion(self, payload: Dict[str, Any]) -> httpx.Response:
@@ -420,12 +424,17 @@ class QAPipeline:
             if prompt_template:
                 raw_text = await self._infer_text_async(
                     prompt_template.format(
+                        text=text,
+                        question=outputs.get("question", ""),
                         think=outputs.get("thinking", ""),
                         answer=outputs.get("answer", ""),
                     ),
                     step=job.step,
                 )
-                outputs["eval"] = self._extract_tag(raw_text, "eval") or raw_text.strip()
+                score = self._extract_tag(raw_text, "eval") or raw_text.strip()
+                if score not in {"1", "2", "3", "4", "5"}:
+                    raise ValueError(f"Step 5 returned invalid eval score: {score!r}")
+                outputs["eval"] = score
             else:
                 outputs.setdefault("eval", "")
 

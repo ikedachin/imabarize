@@ -26,6 +26,7 @@ class FakePipelinePool(QAPipeline):
         max_in_flight: int = 2,
         thinking_enabled_by_step: Dict[str, bool] | None = None,
         refine_answer_only: bool = False,
+        eval_content: str = "<eval>5</eval>",
     ) -> None:
         prompt_dir = tmp_path / "prompts"
         prompt_dir.mkdir(parents=True, exist_ok=True)
@@ -34,7 +35,10 @@ class FakePipelinePool(QAPipeline):
             "answer_prompt": "STEP:answer item={text} question={question}",
             "thinking_prompt": "STEP:thinking item={text} question={question} answer={answer}",
             "refine_answer_prompt": "STEP:refine item={text} question={question} think={think} answer={answer}",
-            "eval_prompt": "STEP:eval think={think} answer={answer}",
+            "eval_prompt": (
+                "STEP:eval item={text} question={question} "
+                "think={think} answer={answer}"
+            ),
         }
         prompt_settings: List[Dict[str, str]] = []
         for name, body in prompts.items():
@@ -59,6 +63,7 @@ class FakePipelinePool(QAPipeline):
         self.events: List[Dict[str, Any]] = []
         self.payloads: List[Dict[str, Any]] = []
         self.refine_answer_only = refine_answer_only
+        self.eval_content = eval_content
 
     async def _post_chat_completion(self, payload: Dict[str, Any]) -> httpx.Response:
         self.payloads.append(payload)
@@ -104,7 +109,7 @@ class FakePipelinePool(QAPipeline):
             else:
                 content = f"<think>{item} refined thinking</think>\n\n{item} refined answer"
         elif step == "eval":
-            content = "<eval>5</eval>"
+            content = self.eval_content
         else:
             content = ""
 
@@ -179,6 +184,22 @@ class PipelinePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results[1]["eval"], "5")
         self.assertLessEqual(pipeline.max_observed_in_flight, 2)
 
+    async def test_invalid_eval_score_marks_item_failed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            pipeline = FakePipelinePool(
+                Path(tmpdir),
+                max_in_flight=1,
+                eval_content="<eval>6</eval>",
+            )
+            try:
+                results = await pipeline.create_qa_batch_async(["fast"], batch_size=1)
+            finally:
+                await pipeline.aclose()
+
+        self.assertTrue(results[0]["failed"])
+        self.assertEqual(results[0]["failed_step"], 5)
+        self.assertIn("invalid eval score", results[0]["error"])
+
     async def test_thinking_control_is_applied_per_step(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
             pipeline = FakePipelinePool(
@@ -207,6 +228,14 @@ class PipelinePoolTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(step_payloads["thinking"]["chat_template_kwargs"]["enable_thinking"])
         self.assertFalse(step_payloads["refine"]["chat_template_kwargs"]["enable_thinking"])
         self.assertFalse(step_payloads["eval"]["chat_template_kwargs"]["enable_thinking"])
+        self.assertEqual(step_payloads["eval"]["temperature"], 0)
+        self.assertEqual(step_payloads["eval"]["top_p"], 1.0)
+        self.assertEqual(step_payloads["eval"]["max_tokens"], 16)
+        self.assertIn("item=fast", step_payloads["eval"]["messages"][0]["content"])
+        self.assertIn(
+            "question=fast question",
+            step_payloads["eval"]["messages"][0]["content"],
+        )
 
     async def test_refine_receives_thinking_and_answer_separately(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
