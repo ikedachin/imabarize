@@ -1,0 +1,24 @@
+# Reusable profiles. Patterns use full-line matching, not substring matching.
+thinking_markdown_v2:
+  type: text
+  rules:
+    - type: line_equals
+      index: 0
+      value: '## 思考プロセス'
+    - type: line_fullmatch
+      index: 1
+      pattern: '###[ \t]+[0-9]+\.[ \t]+\S.*'
+    - type: matching_line_count
+      pattern: '###[ \t]+[0-9]+\.[ \t]+\S.*'
+      min: 1
+      max: 5
+    - type: blank_line_after
+      pattern: '(?:## 思考プロセス|###[ \t]+[0-9]+\.[ \t]+\S.*)'
+    - type: forbidden_suffix_lines
+      patterns:
+        - '`{3,}[^`]*'
+        - "'{3,}[^']*"
+        - '"{3,}[^"]*'
+        - '(?:[（(]\s*)?(?:文字数|字数|総文字数|合計文字数|文字数カウント)\s*[:：]?\s*[0-9０-９,，]+\s*(?:文字|字)?\s*(?:[）)])?'
+        - '[（(]?\s*[0-9０-９,，]+\s*(?:文字|字)\s*[）)]?'
+        - '[^\w\s]+(?:\s+[^\w\s]+)*'

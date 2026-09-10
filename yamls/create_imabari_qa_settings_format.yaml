@@ -35,6 +35,16 @@ prompts: # 処理の順に並べること
 # ------------------------------------
 output_path: ./test_output/imabari_qa
 
+# Extracted fields are checked after refinement and before evaluation.
+# Paths, like prompt paths, are relative to the working directory.
+output_validation:
+  enabled: true
+  on_failure: reject
+  profiles_file: ./yamls/qa_output_validation_format.yaml
+  fields:
+    thinking:
+      profile: thinking_markdown_v2
+
 # ------------------------------------
 # Retry settings
 # ------------------------------------

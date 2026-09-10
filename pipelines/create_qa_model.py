@@ -2,12 +2,14 @@ import asyncio
 import json
 import random
 import time
+from collections import Counter
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 import httpx
 
+from commons.output_validation import OutputFormatError, OutputValidator
 from commons.utils_msg import msg_debug, msg_error, msg_info
 
 
@@ -26,6 +28,7 @@ class PipelineJob:
 class QAPipeline:
     def __init__(self, settings: Dict):
         self.settings = settings
+        self.output_validator = OutputValidator(settings.get("output_validation"))
         self.inference_config = dict(settings.get("infer_config", {}))
 
         if settings.get("openrouter", False):
@@ -420,6 +423,9 @@ class QAPipeline:
                 outputs["answer"] = refined_answer
 
         elif job.step == 5:
+            # Step 4 may replace both thinking and answer. Validate those final
+            # values before spending an inference request on evaluation.
+            self.output_validator.check(outputs)
             prompt_template = self.prompts.get("eval_prompt")
             if prompt_template:
                 raw_text = await self._infer_text_async(
@@ -468,6 +474,7 @@ class QAPipeline:
         results: Dict[int, Dict[str, Any]] = {}
         failed_count = 0
         completed_count = 0
+        format_rejections = Counter()
         total_items = len(texts)
         worker_count = max(1, min(self.max_in_flight, total_items))
 
@@ -544,15 +551,21 @@ class QAPipeline:
                             f"completed={completed_count} failed={failed_count}"
                         )
                     )
-                    await _emit_result(
-                        job.item_id,
-                        self._failure_result(
-                            item_id=job.item_id,
-                            step=job.step,
-                            error=str(exc),
-                            outputs=job.previous_outputs,
-                        ),
+                    failure = self._failure_result(
+                        item_id=job.item_id,
+                        step=job.step,
+                        error=str(exc),
+                        outputs=job.previous_outputs,
                     )
+                    if isinstance(exc, OutputFormatError):
+                        failure["error_type"] = "output_format"
+                        failure["validation_errors"] = exc.errors
+                        # Count affected records per field/rule, not repeated
+                        # violations of the same rule within one record.
+                        format_rejections.update({
+                            f"{error['field']}.{error['rule']}" for error in exc.errors
+                        })
+                    await _emit_result(job.item_id, failure)
                 finally:
                     queue.task_done()
 
@@ -563,6 +576,10 @@ class QAPipeline:
         await asyncio.gather(*workers)
 
         total_elapsed = time.monotonic() - start_time
+        if format_rejections:
+            print(msg_info("Output format rejection counts: " + json.dumps(
+                dict(format_rejections), ensure_ascii=False, sort_keys=True,
+            )))
         print(
             msg_info(
                 f"Pipeline-pool finished items={total_items} completed={completed_count} "
