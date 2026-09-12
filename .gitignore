@@ -2,6 +2,9 @@
 /.venv
 uv.lock
 .env
+.env.*
+!.env.example
+!.env.sample
 
 # pycache
 __pycache__/
@@ -16,16 +19,26 @@ __pycache__/
 
 
 # data 
+# Local inputs and generated datasets, caches, failures, and runtime locks.
+/data/
+/output/
+
+# Keep the checked-in mock sample JSONL/Markdown, but ignore runtime locks.
+/examples/reasoning_effort_dataset/sample_output/*.lock
+/examples/reasoning_effort_dataset/sample_output/failures.jsonl
+
 test_source/JaQuAD_jsonls/*
 test_source/wiki/*
 !test_source/.gitkeep
 !test_source/wiki/.gitkeep
 
-test_output/*
-test_output/imabari_qa/*
+# Preserve directory placeholders at any depth; ignore all other output files.
+/test_output/**
+!/test_output/**/
+!/test_output/**/.gitkeep
 
-wiki/*
-wiki_test/*
+/wiki/
+/wiki_test/
 
 # Huggingface uploader
 upload_imabari_qa_v4_to_huggingface.ipynb

@@ -436,3 +436,196 @@ GRPO 向け4択 Q&A 生成（`main_create_grpo_qa.py`）では、以下のよう
 ## ライセンス
 Apache License 2.0です。
 `LICENSE` を参照してください。
+
+## Reasoning Effort Dataset Generator
+
+validated QA の question / answer を固定し、今治弁の thinking を canonical effort ごとに一度生成して、Qwen3.8 と llm-jp-4 向け SFT JSONL を同時に作ります。既存 pipeline とは独立した新規機能です。
+
+| Canonical effort | 推論の方針 | Qwen3.8 | llm-jp-4 |
+| --- | --- | --- | --- |
+| low | 必要最小限の事実と推論 | low | low |
+| medium | 標準的な分析・整理・確認 | medium | medium |
+| high | 必要に応じた分解・比較・検証・整合性確認 | xhigh | high |
+
+`expand_all` は1 QAあたり通常3回の推論で6レコードを作ります。モデル別の再推論はありません。形式・長さ・通信エラーの再試行が発生した場合は、実際の呼び出し数が増えます。`fixed` は指定した1 effort、`token_length` は指定 effort のプロンプトで1回生成し、reference tokenizer の実token数から low / medium / high を付与します。`token_length` の境界は隙間・重複なしで指定します。
+
+```text
+                question + answer (+ context)
+                            │
+                 Canonical low / medium / high
+                            │
+                      LLM inference
+                            │
+                 今治弁 thinking（共通）
+                            │
+               Format → Token Length validation
+                            │
+                    Canonical cache
+                     ┌──────┴──────┐
+                     ▼             ▼
+                 Qwen3.8        llm-jp-4
+                 Formatter      Formatter
+               high → xhigh    high → high
+                     │             │
+               Chat template    Harmony validation
+                     │             │
+                qwen38.jsonl   llmjp4.jsonl
+```
+
+### 実行方法と設定
+
+新機能には `httpx`, `transformers`, `datasets`, `jinja2` が必要です。既存環境への依存追加は `pyproject.toml` に記載しています。リポジトリルートから実行してください。YAML内の相対パスも作業ディレクトリ基準です。
+
+```bash
+python main_create_reasoning_effort_dataset.py \
+  -p ./yamls/create_reasoning_effort_dataset.yaml
+```
+
+[設定テンプレート](yamls/create_reasoning_effort_dataset_settings_format.yaml)には全項目を記載しています。公開Tokenizerのrevisionは検証したコミットに固定しています。llm-jp は公式カスタムTokenizerを使用するため `trust_remote_code: true` です。生成モデルは出力対象Tokenizerとは独立して設定します。認証には `generator.api_key_env` が指定する環境変数を利用します（`.env` の自動読込はしません）。
+
+```yaml
+source:
+  type: huggingface
+  dataset_name: ikedachin/imabari_wiki_qa_v4_validated
+  split: train
+# ローカル入力の代替:
+# source: {type: local, path: ./data/input.jsonl}
+fields: {id: qa_id, question: question, answer: answer, thinking: thinking, context: null}
+generator:
+  provider: local
+  server_url: http://localhost:8000/v1
+  model_name: Qwen3.8-27B
+  api_key_env: OPENAI_API_KEY
+  generation: {max_tokens: 4096, temperature: 0.2, top_p: 0.95}
+  use_reasoning_effort: true
+  reasoning_effort_by_canonical: {low: low, medium: medium, high: xhigh}
+reasoning_effort:
+  mode: expand_all
+```
+
+この断片は全設定の代替ではありません。テンプレートの `thinking_generation`, `targets`, `output` 等と併せて指定します。provider は接続先の説明ラベルで、通信方式は共通の OpenAI互換 `/chat/completions` です。OpenRouterの場合はURLとモデル名・キー環境変数を設定してください。
+
+### thinking の正規形
+
+```text
+## 思考プロセス
+
+### 1. 見出し名
+
+本文
+
+### 2. 見出し名
+
+本文
+```
+
+タイトル直後、Section Heading直後、Section本文と次Sectionの間には、**空行がちょうど1行**必要です。不要な連続空行は禁止です。番号は1から連続、最低2section、各sectionに本文が必要です。`<think>` / `</think>`、code fence、前置き・後書き、別のfinal answerを含めません。
+
+`ThinkingFormatValidator` は行構造から機械可読エラー（例: `missing_blank_line_after_title`, `empty_section_body`）を返します。失敗時はエラーと修正指示を次のプロンプトへ渡します。`max_format_retries: 2` は初回と追加2回が上限です。長さの再試行は `max_length_retries` で別に管理します。検証を無効化する設定は受け付けません。CRLFと末尾改行1個だけを正規化し、壊れたMarkdownの自動修復は行いません。
+
+今治弁は全effortで必須です。「〜けん」「〜とる」「〜よる」「〜なんよ」「ほうやけん」を文脈に応じて使い、語尾の機械的置換や過度な方言化を避けるプロンプトにしています。元の thinking は生成プロンプトへ渡しません。元answerに合わせた架空の根拠や、固有名詞・年・数値の創作も禁止しています。
+
+### Token数とモデル別出力
+
+`thinking_generation.length_reference_tokenizer` のtoken数を `canonical_thinking_tokens` に記録し、effort別の `min_tokens` / `max_tokens` と照合します。各Datasetの `thinking_tokens` はそれぞれの対象Tokenizerで計測します。特殊トークンは計数に追加しません。文字数による代替はありません。
+
+Qwen / llm-jp の対応レコードは `source_qa_id`, `canonical_record_id`, `question`, `thinking`, `answer`, `canonical_reasoning_effort` を共有します。`qa_id` は canonical ID と対象familyから作ります。元IDを含むmetadataは `source_metadata` に保持し、`eval`, `source_files`, `chunk_index` 等も維持します。`keep_original_thinking: true` では `original_thinking` も保持します。
+
+モデル差は `reasoning_effort`, `thinking_tokens`, `target_model_family`, `target_tokenizer`, `messages` 等に現れます。Formatterはthinking本文を書き換えません。
+
+- Qwen: `messages` のassistantに `reasoning_content: thinking`, `content: answer` を格納し、公式テンプレートが `<think>` wrapperを付けます。`chat_template_kwargs.reasoning_effort` を必ず学習時にも渡してください。mediumには独自directiveを追加しません。
+- llm-jp: 公開Datasetの構造に合わせ、`messages` にsystem metadata、user、analysis assistant、final assistantを格納します。contentはtext blockの配列です。公開Datasetではこの配列がJSON文字列として格納されていますが、本出力JSONLでは配列を直接保存します。
+- llm-jp の `template_messages` はTransformers用のadapter形式（assistantの `thinking` / `content`）です。`apply_chat_template(template_messages, add_generation_prompt=False, **chat_template_kwargs)` でanalysis / finalを生成します。native `messages` を直接Transformersへ渡さないでください。
+- 両Datasetの `text` は公式テンプレートで検証した学習用文字列です。llm-jpは公式Harmony parserでもtoken単位の往復確認を行います。再テンプレート化時は保存済みkwargsを使用します。`text` を学習する場合はチャットテンプレートを二重適用しないでください。
+
+### Cache / Resume / Failure
+
+形式と長さに合格したcanonicalだけをJSONL journalへfsync付きで保存します。cache keyはsource ID・QA内容・metadata・effort・生成モデル・プロンプト本文/version・検証条件を含み、対象モデル設定は含みません。同じcanonical cacheで出力対象を追加しても再推論しません。Formatterの追加は新規クラスとprofile登録で対応できます。
+
+同じCLI・設定で再実行すると、成功済みcanonicalを再検証して再利用します。対象ごとのJSONLに記録されたcanonical IDを成功statusとして扱い、未出力targetだけを再処理します。例えばQwen成功・llm-jp失敗なら、次回の生成呼び出しは0回でllm-jpのみ再試行します。Tokenizerを変更する場合は新しい出力パスを指定してください。
+
+末尾の途中書込みは再開時に復旧します。中間行の破損は黙って無視せず停止します。出力パスの重複・入力との衝突を拒否し、ファイルロックで同一出力への並行実行を防止します。canonical cacheが後から破損した場合はそのレコードを失敗扱いにし、自動再生成しません。修復する場合は該当cacheと出力を確認してください。
+
+1件の生成・検証・Formatter・書込エラーで他レコードを停止しません。`failures_path` にsource ID、canonical ID、effort、`failed_step`, `format_errors`, `error` を記録します。全レコード処理後にsummaryを表示し、最終失敗が残ればCLIは終了コード1を返します。`generator_calls` は生成メソッド呼出数、`llm_inference_calls` は通信再試行を含むAPI要求数、`output_records` は再開前を含む出力総数です。
+
+入力はHF streamingまたはローカルJSONLを有界windowで読み、Queue / worker pool、`max_in_flight`, `pipeline_batch_size`, httpx connection poolで処理します。生成APIはthinkingのみ要求し、返却contentを使用します。provider内部の非公開reasoningフィールドをfallbackとして保存しません。
+
+### 検証とサンプル
+
+```bash
+python -m unittest test.test_reasoning_effort_dataset -v
+# ダウンロード済み公式Tokenizerでの追加検証:
+REASONING_REAL_TOKENIZERS=/path/to/hf/cache \
+  python -m unittest test.test_reasoning_effort_dataset -v
+# Mock HTTP + 実Tokenizerの再現可能なサンプル:
+python examples/reasoning_effort_dataset/run_mock_sample.py \
+  --tokenizer-cache /path/to/hf/cache
+```
+
+[Mockサンプル](examples/reasoning_effort_dataset/sample_output/)には、3 API mock呼出しから生成した両モデル各3レコードと、読みやすい [thinking表示](examples/reasoning_effort_dataset/sample_output/thinking_samples.md) を収録しています。これは手書きfixtureによる構造検証で、実LLM推論結果ではありません。サンプルではtoken範囲を全effort 1〜4096へ広げています。通常のeffort別token範囲での実LLM品質検証とは区別してください。
+
+### 仕様確認元・制約
+
+2026-09-11に以下の公式情報と公開Datasetの先頭レコードを確認しました。
+
+- [Qwen3.8公式chat template](https://huggingface.co/Qwen/Qwen3.8-27B/blob/main/chat_template.jinja): reasoning_contentとeffortの条件付け。
+- [llm-jp公式chat template](https://huggingface.co/llm-jp/llm-jp-4-8b-thinking/blob/main/chat_template.jinja)、[Cookbook](https://github.com/llm-jp/llm-jp-4-cookbook): thinking/contentからHarmonyへの変換とカスタムTokenizer。
+- [llm-jp公開SFT Dataset](https://huggingface.co/datasets/llm-jp/llm-jp-4-thinking-sft-data): channelとcontent blockを持つmessages。
+- [入力validated QA](https://huggingface.co/datasets/ikedachin/imabari_wiki_qa_v4_validated): question/thinking/answer/messagesとMarkdown構造。
+- [Transformers chat template](https://huggingface.co/docs/transformers/chat_templating): 学習時は `add_generation_prompt=False`。
+
+構造Validatorは、自然な今治弁・事実の正しさ・意味的な水増し・見出しのない最終回答混入まで保証するものではありません。これらはプロンプトで制約し、実生成後の品質確認が必要です。contextを設定した場合は生成根拠として使い、出力のuser messageは元questionを維持します。ファイルロックはmacOS/Linuxの `fcntl` を使用します。既存lockfileは変更禁止のため更新していません。新依存の導入時は環境側で解決してください。
+
+### 元記事全文をQAのidで照合する設定
+
+Reasoning Effort生成では、以下の設定により `test_output/cpt/wiki/all.jsonl` の全文を根拠としてプロンプトへ渡します。実行設定・設定テンプレートで有効化しています。
+
+```yaml
+source_context:
+  enabled: true
+  path: ./test_output/cpt/wiki/all.jsonl
+  qa_id_field: id
+  source_id_field: id
+  text_field: text
+  chunk_index_field: chunk_index
+  mode: concatenate_all
+```
+
+QA自身の識別子は引き続き `fields.id: qa_id`、記事との照合は `source_context.qa_id_field: id` です。元記事は起動時に一度読み込み、同じidの全chunkを `chunk_index` 昇順で並べ、空行で結合します。同じchunk番号の行はファイル内の順序で全件保持し、重複の警告とsummaryの件数を記録します。整数idと文字列idは文字列表現で照合します。
+
+QAごとにeffort展開前に照合し、結合した全文を `generation_context` として3 effortのプロンプトへ共通で渡します。有効時はこの全文を優先し、無効時は従来の `fields.context` を使います。全文の要約・切捨ては行いません。APIの入力上限超過は生成失敗として記録し、他QAの処理を継続します。question、answer、出力messagesの仕様は維持します。
+
+`source_context_metadata` に記事id、参照ファイルのパス、全chunk番号、結合本文のSHA-256を保存します。全文とmetadataをcache keyへ反映するため、本文なしの旧cacheや変更前の本文のcacheは再利用しません。通常設定ではcache・両Dataset・failureのファイル名を `reasoning_effort_with_context` 系へ分離しており、旧成果物を保持します。同じ本文・設定での再開は推論0回です。
+
+id不一致、QAのid欠損、記事の本文欠損・不正なchunk番号は、QA単位の `source_context_resolution` failureとし、effort展開も推論も行いません。記事の一部だけが欠損している場合も、残りのchunkだけで生成することはありません。参照ファイルの欠損、不正JSON、照合不能な元データ行のid欠損は生成開始前に停止します。参照元と出力のパス衝突も拒否します。
+
+追加の結合・cache・失敗処理テスト:
+
+```bash
+python -m unittest test.test_reasoning_effort_source_context -v
+```
+
+既存の手書きMockサンプルは記事idを持たない独立fixtureなので、サンプルスクリプトでは `source_context.enabled: false` を明示しています。
+
+### 生成プロンプトと検証失敗の診断
+
+出力形式をsystemメッセージにも指定し、長いcontextの見出しや文章を出力の形式として引き継がないようにしています。提出するMarkdownの最初の文字は `#`、先頭の空白・空行は0文字と明示します。low / medium / highのプロンプトには空行込みの具体例と提出前の確認を追加しています。
+
+プロンプト本文とsystemの出力指示はcache keyに含まれます。指示を変更した場合、旧指示による生成結果を流用しません。検証条件の緩和や、先頭空行の自動削除は行っていません。
+
+実行中は `Thinking request`（QA ID・effort・試行番号）、`Thinking rejected`（検証段階・エラーコード）、`Thinking validated`（確定effort・token数）を逐次表示します。再試行上限に達した不合格文章はfailure JSONLの `rejected_thinking` に保存します。この文章は成功cacheやSFT Datasetには入りません。プロンプト・コード変更は、動作中のプロセスを停止して再実行すると反映されます。
+
+生成用Qwen3.8では、内部thinking有効時の実応答に先頭改行2文字が残るケースを確認しました。指示を強めても残ったため、既定設定は `generator.generation.chat_template_kwargs.enable_thinking: false` と `generator.use_reasoning_effort: false` にしています。生成モデル内部のthinkingを無効にし、提出用の今治弁Markdownをcontentへ直接生成します。Canonical low / medium / highの違いは各プロンプトで指示し、Dataset側のeffort mapping・thinking領域は維持します。これは出力対象Qwenの `enable_thinking: true` とは別設定です。
+
+長さの再試行では、エラーコードに加えてreference tokenizerによる前回の実測token数と許容範囲を返します。モデルが不足・超過の程度を判断できるようにします。検証失敗を無条件で成功扱いにすることはありません。
+
+### ローカル実行設定とGit管理
+
+`yamls/create_reasoning_effort_dataset.yaml` は実サーバーやローカル出力先を設定するためGit管理対象外です。共有するのは `*_settings_format.yaml` の設定テンプレートです。新しくcloneした環境では、初回に次のコマンドで実行設定を作成し、接続先を編集してください。既存の実行設定は上書きしません。
+
+```bash
+cp -n yamls/create_reasoning_effort_dataset_settings_format.yaml \
+  yamls/create_reasoning_effort_dataset.yaml
+```
+
+テストも共有テンプレートから設定を読み、ローカル実行設定には依存しません。`.env.*` は除外しますが、値を伏せた `.env.example` と `.env.sample` は共有できます。MockサンプルのJSONL・Markdownは共有し、実行時のロック・失敗ログは除外します。

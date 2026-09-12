@@ -1,0 +1,98 @@
+# Paths are relative to the working directory; run from the repository root.
+source:
+  type: huggingface
+  dataset_name: ikedachin/imabari_wiki_qa_v4_validated
+  split: train
+  # Local alternative: type: local, path: ./data/input.jsonl
+fields:
+  id: qa_id
+  question: question
+  answer: answer
+  thinking: thinking
+  context: null
+
+source_context:
+  enabled: true
+  path: ./test_output/cpt/wiki/all.jsonl
+  qa_id_field: id
+  source_id_field: id
+  text_field: text
+  chunk_index_field: chunk_index
+  mode: concatenate_all
+
+generator:
+  provider: local  # OpenAI-compatible local / openrouter endpoint
+  server_url: http://localhost:8000/v1
+  model_name: Qwen3.8-27B
+  api_key_env: OPENAI_API_KEY
+  generation:
+    # Generate the requested Markdown directly; avoid internal-thinking separators.
+    chat_template_kwargs:
+      enable_thinking: false
+    max_tokens: 4096
+    temperature: 0.2
+    top_p: 0.95
+  use_reasoning_effort: false  # Canonical effort is controlled by the per-effort prompts.
+  reasoning_effort_by_canonical: {low: low, medium: medium, high: xhigh}
+
+reasoning_effort:
+  mode: expand_all  # fixed / expand_all / token_length
+  effort: medium   # fixed effort; generation prompt effort for token_length
+  token_length:
+    low: {max_tokens: 256}
+    medium: {min_tokens: 257, max_tokens: 768}
+    high: {min_tokens: 769}
+
+thinking_generation:
+  length_reference_tokenizer: Qwen/Qwen3.8-27B
+  reference_revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+  prompt_version: '1'
+  format_validation: true
+  max_format_retries: 2
+  length_validation: true
+  max_length_retries: 2
+  low:
+    min_tokens: 64
+    max_tokens: 256
+    prompt: ./prompts/create_reasoning_effort_dataset/thinking_low.md
+  medium:
+    min_tokens: 256
+    max_tokens: 768
+    prompt: ./prompts/create_reasoning_effort_dataset/thinking_medium.md
+  high:
+    min_tokens: 768
+    max_tokens: 2048
+    prompt: ./prompts/create_reasoning_effort_dataset/thinking_high.md
+
+targets:
+  qwen3_8:
+    enabled: true
+    tokenizer_name: Qwen/Qwen3.8-27B
+    revision: 1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0
+    trust_remote_code: false
+  llm_jp_4:
+    enabled: true
+    tokenizer_name: llm-jp/llm-jp-4-8b-thinking
+    revision: fc7c15c262710016c19bcda4372a96ff68875846
+    trust_remote_code: true
+
+output:
+  qwen3_8:
+    path: ./output/imabari_reasoning_effort_with_context_qwen38.jsonl
+  llm_jp_4:
+    path: ./output/imabari_reasoning_effort_with_context_llmjp4.jsonl
+  cache_path: ./output/.reasoning_effort_with_context_generation_cache.jsonl
+  failures_path: ./output/reasoning_effort_with_context.failures.jsonl
+  keep_original_thinking: true
+
+max_in_flight: 8
+pipeline_batch_size: 32
+max_connections: 16
+max_keepalive_connections: 8
+read_timeout: 600
+connect_timeout: 5
+pool_timeout: 30
+keepalive_expiry: 120
+http2: false
+max_retries: 3  # Additional transport retries; separate from format/length retries.
+wait_seconds: 5

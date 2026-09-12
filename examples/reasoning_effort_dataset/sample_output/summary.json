@@ -1,0 +1,25 @@
+{
+  "source_qa": 1,
+  "generator_calls": 3,
+  "canonical_low": 1,
+  "qwen3_8_written": 3,
+  "llm_jp_4_written": 3,
+  "canonical_medium": 1,
+  "canonical_high": 1,
+  "llm_inference_calls": 3,
+  "output_records": {
+    "qwen3_8": 3,
+    "llm_jp_4": 3
+  },
+  "provenance": "Mock HTTP generation, real pinned official tokenizers; not actual LLM inference",
+  "actual_llm_inference_calls": 0,
+  "mock_http_calls": 3,
+  "paired_fields_equal": [
+    "source_qa_id",
+    "canonical_record_id",
+    "question",
+    "thinking",
+    "answer",
+    "canonical_reasoning_effort"
+  ]
+}
