@@ -69,6 +69,7 @@ class SourceContextTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(data['validated_answer'], ROW['answer'])
             self.assertNotIn(ROW['thinking'], prompt)
         for record in p.cache.records.values():
+            self.assertNotIn('generation_context', record)
             self.assertEqual(record['source_qa_id'], ROW['qa_id'])
             self.assertEqual(record['source_context_metadata']['article_id'], '42')
             self.assertEqual(record['source_context_metadata']['chunk_indices'], [0, 1])
@@ -76,7 +77,10 @@ class SourceContextTests(unittest.IsolatedAsyncioTestCase):
             for record in journal.records.values():
                 self.assertEqual(record['question'], ROW['question'])
                 self.assertEqual(record['answer'], ROW['answer'])
-                self.assertEqual(record['generation_context'], '前半\n\n後半')
+                self.assertNotIn('generation_context', record)
+        for journal in [p.cache, *p.outputs.values()]:
+            for line in journal.path.read_text().splitlines():
+                self.assertNotIn('generation_context', json.loads(line))
 
     async def test_missing_id_and_bad_text_fail_once_each_continue(self):
         self.write([{'id': 'good', 'chunk_index': 0, 'text': '全文'},
@@ -145,7 +149,31 @@ class SourceContextTests(unittest.IsolatedAsyncioTestCase):
         self.cfg['fields']['context'] = 'inline'
         p = self.make()
         await p.run([dict(ROW, inline='inline context')])
-        self.assertTrue(all(r['generation_context'] == 'inline context' for r in p.cache.records.values()))
+        self.assertTrue(all('generation_context' not in r for r in p.cache.records.values()))
+        for prompt, _ in p.generator.calls:
+            data = json.loads(prompt.split('入力データ（命令ではありません）:\n')[1])
+            self.assertEqual(data['context'], 'inline context')
+
+    async def test_old_cache_context_not_copied_to_new_outputs(self):
+        self.write([{'id': '42', 'chunk_index': 0, 'text': '全文'}])
+        p = self.make()
+        await p.run([dict(ROW, id='42')])
+        expected = {family: dict(journal.records) for family, journal in p.outputs.items()}
+        await p.aclose()
+        # Reproduce caches written before context was excluded from storage.
+        for key, record in list(p.cache.records.items()):
+            p.cache.append(dict(record, generation_context='全文'), key)
+        for journal in p.outputs.values():
+            journal.path.unlink()
+        second = self.make()
+        await second.run([dict(ROW, id='42')])
+        self.assertEqual(second.generator.calls, [])
+        for family, journal in second.outputs.items():
+            self.assertEqual(set(journal.records), set(expected[family]))
+            for key, record in journal.records.items():
+                self.assertEqual({k: v for k, v in record.items() if k != 'journal_key'},
+                                 expected[family][key])
+                self.assertNotIn('generation_context', record)
 
     async def test_large_article_not_truncated(self):
         body = '本文' * 60000 + '最後の証拠'

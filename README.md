@@ -595,6 +595,8 @@ QA自身の識別子は引き続き `fields.id: qa_id`、記事との照合は `
 
 QAごとにeffort展開前に照合し、結合した全文を `generation_context` として3 effortのプロンプトへ共通で渡します。有効時はこの全文を優先し、無効時は従来の `fields.context` を使います。全文の要約・切捨ては行いません。APIの入力上限超過は生成失敗として記録し、他QAの処理を継続します。question、answer、出力messagesの仕様は維持します。
 
+容量を抑えるため、`generation_context` は新規のDataset・生成cacheには保存しません。元記事全文は生成プロンプトとcache keyの計算に使用し、記事id・本文ハッシュ等の `source_context_metadata` は保存します。旧cacheからDatasetを新規出力する場合も本文は除外します。すでに保存済みのファイルは自動で書き換えないため、既存行の容量は変わりません。
+
 `source_context_metadata` に記事id、参照ファイルのパス、全chunk番号、結合本文のSHA-256を保存します。全文とmetadataをcache keyへ反映するため、本文なしの旧cacheや変更前の本文のcacheは再利用しません。通常設定ではcache・両Dataset・failureのファイル名を `reasoning_effort_with_context` 系へ分離しており、旧成果物を保持します。同じ本文・設定での再開は推論0回です。
 
 id不一致、QAのid欠損、記事の本文欠損・不正なchunk番号は、QA単位の `source_context_resolution` failureとし、effort展開も推論も行いません。記事の一部だけが欠損している場合も、残りのchunkだけで生成することはありません。参照ファイルの欠損、不正JSON、照合不能な元データ行のid欠損は生成開始前に停止します。参照元と出力のパス衝突も拒否します。

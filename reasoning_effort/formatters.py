@@ -30,6 +30,8 @@ class BaseReasoningEffortFormatter:
         if errors:
             raise ValueError(",".join(errors))
         record = deepcopy(canonical)
+        # Older caches may still contain the article used for generation.
+        record.pop("generation_context", None)
         effort = self.profile.effort_map[canonical["canonical_reasoning_effort"]]
         messages = [
             {"role": "user", "content": canonical["question"]},

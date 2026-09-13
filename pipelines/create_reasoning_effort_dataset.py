@@ -255,6 +255,8 @@ class ReasoningEffortDatasetPipeline:
                       thinking_generator=self.settings["generator"]["model_name"],
                       generation_method={"fixed": "fixed_effort", "expand_all": "effort_conditioned",
                                          "token_length": "token_length_labeled"}[self.mode])
+        # The full article has already contributed to the prompt and cache key.
+        record.pop("generation_context", None)
         self._check(record)
         self.cache.append(record, key)
         print(msg_info(f"Thinking validated source_qa_id={source['source_qa_id']} "
