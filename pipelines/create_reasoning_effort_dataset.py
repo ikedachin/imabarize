@@ -11,6 +11,8 @@ from commons.utils_msg import msg_info
 
 from reasoning_effort.cache import JsonlJournal, stable_id
 from reasoning_effort.formatters import FORMATTERS
+from reasoning_effort.output_schema import compact_output
+from reasoning_effort.progress import QAProgress, write_log
 from reasoning_effort.generator import OUTPUT_CONTRACT, ThinkingGenerator
 from reasoning_effort.source_context import SourceContextIndex
 from reasoning_effort.validators import (
@@ -90,6 +92,7 @@ class ReasoningEffortDatasetPipeline:
         paths = [Path(output[k]).expanduser().resolve() for k in ("cache_path", "failures_path")]
         enabled = [f for f, c in self.settings["targets"].items() if c.get("enabled", True)]
         paths += [Path(output[f]["path"]).expanduser().resolve() for f in enabled]
+        paths += [Path(str(Path(output[f]["path"]).expanduser().resolve()) + '.resume.jsonl') for f in enabled]
         if len(set(paths)) != len(paths):
             raise ValueError("Cache, failure and output paths must be distinct")
         source = self.settings.get("source", {})
@@ -107,6 +110,8 @@ class ReasoningEffortDatasetPipeline:
             self.cache = JsonlJournal(paths[0])
             self.failures = JsonlJournal(paths[1])
             self.outputs = {f: JsonlJournal(output[f]["path"]) for f in enabled}
+            self.output_metadata = {f: JsonlJournal(str(j.path) + '.resume.jsonl')
+                                    for f, j in self.outputs.items()}
         except Exception:
             for lock in self._file_locks:
                 lock.close()
@@ -216,8 +221,8 @@ class ReasoningEffortDatasetPipeline:
         retries = Counter()
         while True:
             self.stats["generator_calls"] += 1
-            print(msg_info(f"Thinking request source_qa_id={source['source_qa_id']} effort={effort} "
-                           f"attempt={1 + sum(retries.values())}"), flush=True)
+            write_log(msg_info(f"Thinking request source_qa_id={source['source_qa_id']} effort={effort} "
+                               f"attempt={1 + sum(retries.values())}"))
             thinking = cleanup(await self.generator.generate(prompt + feedback, effort))
             errors = self.validator.validate(thinking)
             step = "thinking_format_validation"
@@ -232,8 +237,8 @@ class ReasoningEffortDatasetPipeline:
             if not errors:
                 break
             self.stats[step + "_failures"] += 1
-            print(msg_info(f"Thinking rejected source_qa_id={source['source_qa_id']} effort={effort} "
-                           f"step={step} errors={','.join(errors)}"), flush=True)
+            write_log(msg_info(f"Thinking rejected source_qa_id={source['source_qa_id']} effort={effort} "
+                               f"step={step} errors={','.join(errors)}"))
             retry_key = "max_format_retries" if step == "thinking_format_validation" else "max_length_retries"
             if retries[step] >= self.generation.get(retry_key, 2):
                 raise RecordFailure(step, errors, thinking)
@@ -259,8 +264,8 @@ class ReasoningEffortDatasetPipeline:
         record.pop("generation_context", None)
         self._check(record)
         self.cache.append(record, key)
-        print(msg_info(f"Thinking validated source_qa_id={source['source_qa_id']} "
-                       f"effort={canonical_effort} tokens={count}"), flush=True)
+        write_log(msg_info(f"Thinking validated source_qa_id={source['source_qa_id']} "
+                           f"effort={canonical_effort} tokens={count}"))
         return record
 
     def _failure(self, source: dict, key: str, effort: str | None, step: str, exc: Exception) -> None:
@@ -286,8 +291,11 @@ class ReasoningEffortDatasetPipeline:
                         formatter = self.formatters[family]
                         if key in journal.records:
                             saved = journal.records[key]
-                            if (saved.get("target_tokenizer") != formatter.tokenizer_name
-                                    or saved.get("target_tokenizer_revision") != formatter.revision):
+                            metadata = saved if 'target_tokenizer' in saved else self.output_metadata[family].records.get(key, {})
+                            if not metadata:
+                                raise ValueError('Missing output resume metadata; restore the .resume.jsonl file or choose a new output path')
+                            if (metadata.get("target_tokenizer") != formatter.tokenizer_name
+                                    or metadata.get("target_tokenizer_revision") != formatter.revision):
                                 raise ValueError("Target tokenizer changed; choose a new output path")
                             self.stats[family + "_skipped"] += 1
                             continue
@@ -298,14 +306,20 @@ class ReasoningEffortDatasetPipeline:
                             if record[field] != canonical[field]:
                                 raise ValueError(f"Formatter modified canonical field: {field}")
                         target_step = family + "_write"
-                        journal.append(record)
+                        exported = compact_output(record)
+                        self.output_metadata[family].append({
+                            'canonical_record_id': key,
+                            'target_tokenizer': formatter.tokenizer_name,
+                            'target_tokenizer_revision': formatter.revision,
+                        })
+                        journal.append(exported)
                         self.stats[family + "_written"] += 1
                     except Exception as exc:
                         self._failure(source, key, canonical["canonical_reasoning_effort"], target_step, exc)
         except Exception as exc:
             self._failure(source, key, effort, getattr(exc, "step", step), exc)
 
-    async def run(self, rows: Iterable[dict]) -> dict:
+    async def run(self, rows: Iterable[dict], *, total: int | None = None) -> dict:
         context = self.settings.get("source_context", {})
         if context.get("enabled", False) and self.source_context is None:
             self.source_context = await asyncio.to_thread(SourceContextIndex, context)
@@ -316,6 +330,14 @@ class ReasoningEffortDatasetPipeline:
         if self.generator is None:
             self.generator = ThinkingGenerator(self.settings)
         queue: asyncio.Queue = asyncio.Queue(maxsize=self.settings.get("pipeline_batch_size", 32))
+        if total is None and hasattr(rows, '__len__'):
+            total = len(rows)
+        progress = QAProgress(total, self.stats)
+
+        async def refresh_progress():
+            while True:
+                await asyncio.sleep(1)
+                progress.refresh(force=progress.terminal)
 
         async def worker():
             while True:
@@ -323,11 +345,20 @@ class ReasoningEffortDatasetPipeline:
                 try:
                     if job is None:
                         return
-                    await self._process(*job)
+                    source, effort, remaining = job
+                    progress.active += 1
+                    try:
+                        await self._process(source, effort)
+                    finally:
+                        progress.active -= 1
+                    remaining[0] -= 1
+                    if remaining[0] == 0:
+                        progress.finish_qa()
                 finally:
                     queue.task_done()
 
         workers = [asyncio.create_task(worker()) for _ in range(self.settings.get("max_in_flight", 8))]
+        refresher = asyncio.create_task(refresh_progress())
         try:
             iterator = iter(rows)
             window = self.settings.get("pipeline_batch_size", 32)
@@ -340,19 +371,24 @@ class ReasoningEffortDatasetPipeline:
                         identity = dict(row) if isinstance(row, dict) else {}
                         identity["source_qa_id"] = identity.get(self.settings.get("fields", {}).get("id", "qa_id"))
                         self._failure(identity, "", None, getattr(exc, "step", "source_validation"), exc)
+                        progress.finish_qa()
                         continue
                     efforts = EFFORTS if self.mode == "expand_all" else (self.settings["reasoning_effort"].get("effort", "medium"),)
+                    remaining = [len(efforts)]
                     for effort in efforts:
-                        await queue.put((source, effort))
-                print(msg_info(f"Reasoning source QA queued={self.stats['source_qa']} "
+                        await queue.put((source, effort, remaining))
+                write_log(msg_info(f"Reasoning source QA queued={self.stats['source_qa']} "
                                f"generator_calls={self.stats['generator_calls']}"))
             for _ in workers:
                 await queue.put(None)
             await asyncio.gather(*workers)
         finally:
+            refresher.cancel()
             for worker_task in workers:
                 worker_task.cancel()
             await asyncio.gather(*workers, return_exceptions=True)
+            await asyncio.gather(refresher, return_exceptions=True)
+            progress.close()
         result = dict(self.stats)
         result["llm_inference_calls"] = getattr(self.generator, "call_count", self.stats["generator_calls"])
         result["output_records"] = {family: len(j.records) for family, j in self.outputs.items()}

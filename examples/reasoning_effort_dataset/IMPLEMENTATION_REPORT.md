@@ -1,5 +1,38 @@
 # Reasoning Effort Dataset Generator 実装報告
 
+## 現行仕様（2026-09-14 ドキュメント見直し）
+
+この報告の「1–25」と2026-09-12の追記は、各作業時点の記録です。旧出力の保存項目、当時のテスト件数、実LLM未接続、Gitの状態は現在の状態を表すものではありません。現行の操作手順は [README](../../README.md)、出力例は [構造化サンプル](structured_samples/REPORT.md) を参照してください。
+
+現行実装を読み直して確認した相違点:
+
+- 最終Datasetは `output_schema.compact_output` の許可リストで保存する。Qwenは13項目、llm-jpは14項目。`source_metadata` は元QAの `qa_id`・`id`・`chunk_index` のみ。
+- 両モデルの `messages` はuserとassistantの2要素。assistantは回答の `content` と、Qwenでは `reasoning_content`、llm-jpでは `thinking` を持つ。トップレベルとmessagesの本文は同じ内容を保存する。
+- `text`・`template_messages` は保存しない。`chat_template_kwargs` はllm-jpだけに保存する。テンプレート展開とHarmony検証は生成時の一時的な処理。
+- 対象Tokenizer名とrevisionは `<出力>.resume.jsonl` へ分離する。キャッシュにはcanonical ID、reference token数、内部metadataを保持するが、新規生成では `generation_context` を保存しない。本文は生成プロンプトとキー計算に使用する。
+- 生成側は共有テンプレートで `enable_thinking: false`・`use_reasoning_effort: false`。effortは各プロンプトで制御し、出力ラベルはQwenのhigh→xhigh、llm-jpのhigh→highを維持する。
+- 通常の実行YAMLはGit管理対象外。共有するのは `create_reasoning_effort_dataset_settings_format.yaml`。初回コピーと接続先の編集はREADMEを参照。
+- `sample_output/` は旧形式の履歴資料。`run_mock_sample.py` は現行出力にない内部キーを比較する箇所が残っており、新規出力で `KeyError` になる。現行スキーマの検証にはREADMEのテスト一覧を使用する。
+
+現行の関連ファイルには、初期一覧に加えて以下がある。
+
+```text
+reasoning_effort/output_schema.py
+reasoning_effort/progress.py
+reasoning_effort/source_context.py
+migrate_reasoning_effort_output.py
+migrate_reasoning_effort_directory.py
+test/test_reasoning_effort_output.py
+test/test_reasoning_effort_progress.py
+test/test_reasoning_effort_source_context.py
+```
+
+単一ファイルの移行は `migrate_reasoning_effort_output.py`、キャッシュ・resume情報・失敗履歴まで含む移行は `migrate_reasoning_effort_directory.py` を使用する。後者は検証のみが既定で、`--apply` により新側のバックアップを作成して反映する。詳細な統合条件・固定ファイル名・再開方法はREADMEを参照。
+
+今回の見直しはドキュメントのみであり、以下の過去のテスト結果を再実行したという意味ではない。
+
+## 初期実装時の記録（2026-09-11）
+
 実装日: 2026-09-11。既存実装の変更はREADME追記と依存追加のみ。
 実LLMのサンプル生成は未実施（localhost:8000への接続拒否、使用先回答待ち）。
 Mock生成と実Tokenizer検証は完了しており、実LLM推論完了とは区別する。

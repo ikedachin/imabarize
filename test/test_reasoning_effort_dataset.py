@@ -155,14 +155,14 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(g.peak, 2)
         for key, q in p.outputs['qwen3_8'].records.items():
             j = p.outputs['llm_jp_4'].records[key]
-            for field in ('source_qa_id', 'canonical_record_id', 'question', 'thinking', 'answer', 'canonical_reasoning_effort'):
+            for field in ('source_qa_id', 'question', 'thinking', 'answer'):
                 self.assertEqual(q[field], j[field])
-            self.assertEqual(q['source_metadata'], ROW)
+            self.assertEqual(q['source_metadata'], {k: ROW.get(k) for k in ('qa_id', 'id', 'chunk_index')})
             self.assertEqual(q['qa_id'], key + ':qwen3_8')
-            self.assertEqual(j['reasoning_effort'], q['canonical_reasoning_effort'])
+            self.assertEqual(j['reasoning_effort'], p.cache.records[key]['canonical_reasoning_effort'])
             self.assertEqual(q['reasoning_effort'], {'low': 'low', 'medium': 'medium', 'high': 'xhigh'}[j['reasoning_effort']])
             self.assertEqual(j['thinking_tokens'], q['thinking_tokens'] * 2)
-            self.assertEqual(q['canonical_thinking_tokens'], q['thinking_tokens'] * 3)
+            self.assertEqual(p.cache.records[key]['canonical_thinking_tokens'], q['thinking_tokens'] * 3)
         self.assertTrue(all(ROW['thinking'] not in prompt for prompt, _ in g.calls))
 
     async def test_fixed(self):
@@ -387,12 +387,22 @@ class RealTokenizerTests(unittest.TestCase):
             self.assertEqual(qr['thinking'], jr['thinking'])
             self.assertEqual(qr['thinking_tokens'], len(q.encode(THINKING, add_special_tokens=False)))
             self.assertEqual(jr['thinking_tokens'], len(j.encode(THINKING, add_special_tokens=False)))
-            self.assertIn('<|channel|>analysis', jr['text'])
-            self.assertIn('<think>', qr['text'])
-            self.assertEqual(jr['messages'][2]['channel'], 'analysis')
-            self.assertEqual(jr['messages'][2]['content'][0]['text'], THINKING)
-            self.assertEqual(jr['messages'][3]['channel'], 'final')
-            self.assertEqual(jr['messages'][3]['content'][0]['text'], ROW['answer'])
+            jt = j.apply_chat_template(jr['messages'], tokenize=False, add_generation_prompt=False, **jr['chat_template_kwargs'])
+            qt = q.apply_chat_template(qr['messages'], tokenize=False, add_generation_prompt=False, reasoning_effort=qr['reasoning_effort'])
+            self.assertIn('<|channel|>analysis', jt)
+            self.assertIn('<think>', qt)
+            self.assertEqual(qt, q.apply_chat_template(qr['messages'], tokenize=False,
+                add_generation_prompt=False, reasoning_effort=qr['reasoning_effort'],
+                enable_thinking=True, preserve_thinking=True))
+            for r in (qr, jr):
+                self.assertNotIn('text', r)
+                self.assertNotIn('template_messages', r)
+            self.assertNotIn('chat_template_kwargs', qr)
+            self.assertEqual(jr['messages'], [
+                {'role': 'user', 'content': ROW['question']},
+                {'role': 'assistant', 'content': ROW['answer'], 'thinking': THINKING},
+            ])
+
 
 
 if __name__ == '__main__':

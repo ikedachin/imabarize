@@ -31,7 +31,7 @@ class JsonlJournal:
                             raise ValueError(f"Corrupt journal at {self.path}:{offset}")
                         stream.truncate(offset)
                         break
-                    key = record.get("journal_key", record.get("canonical_record_id"))
+                    key = self.record_key(record)
                     if key:
                         self.records[key] = record
                     if not line.endswith(b"\n"):
@@ -49,6 +49,14 @@ class JsonlJournal:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        index = key or value.get("canonical_record_id")
+        index = key or self.record_key(value)
         if index:
             self.records[index] = value
+
+    @staticmethod
+    def record_key(record):
+        key = record.get('journal_key', record.get('canonical_record_id'))
+        if key is None and isinstance(record.get('qa_id'), str):
+            from reasoning_effort.output_schema import output_family
+            key, _ = output_family(record)
+        return key

@@ -9,6 +9,7 @@ import yaml
 
 from commons.utils_msg import msg_info, msg_success
 from pipelines.create_reasoning_effort_dataset import ReasoningEffortDatasetPipeline
+from reasoning_effort.progress import write_log
 
 
 def load_source(settings: dict) -> Iterator[dict]:
@@ -38,8 +39,15 @@ async def main(settings_path: str) -> dict:
         settings = yaml.safe_load(stream)
     pipeline = ReasoningEffortDatasetPipeline(settings)
     try:
-        summary = await pipeline.run(load_source(settings))
-        print(msg_info(json.dumps(summary, ensure_ascii=False, indent=2)))
+        total = None
+        if settings['source']['type'] == 'local':
+            write_log('QA総件数を確認しています…')
+            def count_rows():
+                with Path(settings['source']['path']).expanduser().open(encoding='utf-8') as stream:
+                    return sum(1 for line in stream if line.strip())
+            total = await asyncio.to_thread(count_rows)
+        summary = await pipeline.run(load_source(settings), total=total)
+        write_log(msg_info(json.dumps(summary, ensure_ascii=False, indent=2)))
         return summary
     finally:
         await pipeline.aclose()
@@ -49,8 +57,8 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Generate shared Imabari thinking and two SFT JSONL datasets.")
     parser.add_argument("-p", "--settings_path", default="./yamls/create_reasoning_effort_dataset.yaml")
     args = parser.parse_args()
-    print(msg_success("Reasoning Effort Dataset Generator Started"))
+    write_log(msg_success("Reasoning Effort Dataset Generator Started"))
     result = asyncio.run(main(args.settings_path))
     if any(value for key, value in result.items() if key.endswith("_terminal_failures")):
         raise SystemExit(1)
-    print(msg_success("Reasoning Effort Dataset Generator Completed"))
+    write_log(msg_success("Reasoning Effort Dataset Generator Completed"))

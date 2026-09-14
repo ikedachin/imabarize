@@ -13,6 +13,8 @@ class ModelProfile:
     thinking_field: str
 
 
+# Explicit existing mapping from shared generation labels to Qwen output labels.
+# It is not a repair rule for invalid exported reasoning_effort values.
 QWEN38 = ModelProfile("qwen3_8", {"low": "low", "medium": "medium", "high": "xhigh"}, "reasoning_content")
 LLMJP4 = ModelProfile("llm_jp_4", {"low": "low", "medium": "medium", "high": "high"}, "thinking")
 
@@ -32,13 +34,19 @@ class BaseReasoningEffortFormatter:
         record = deepcopy(canonical)
         # Older caches may still contain the article used for generation.
         record.pop("generation_context", None)
-        effort = self.profile.effort_map[canonical["canonical_reasoning_effort"]]
+        label = canonical["canonical_reasoning_effort"]
+        if label not in self.profile.effort_map:
+            raise ValueError(f"Unsupported canonical effort for {self.profile.family}: {label}")
+        effort = self.profile.effort_map[label]
         messages = [
             {"role": "user", "content": canonical["question"]},
             {"role": "assistant", "content": canonical["answer"],
              self.profile.thinking_field: canonical["thinking"]},
         ]
+        for obsolete in ('text', 'template_messages', 'chat_template_kwargs'):
+            record.pop(obsolete, None)
         kwargs = self.template_kwargs(effort)
+        # Transient validation only: the rendered string is never exported.
         rendered = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False, **kwargs,
         )
@@ -51,9 +59,9 @@ class BaseReasoningEffortFormatter:
             target_tokenizer=self.tokenizer_name,
             target_tokenizer_revision=self.revision,
             messages=messages,
-            chat_template_kwargs=kwargs,
-            text=rendered,
         )
+        if self.profile.family == "llm_jp_4":
+            record["chat_template_kwargs"] = kwargs
         return record
 
     def template_kwargs(self, effort: str) -> dict:
@@ -67,7 +75,9 @@ class Qwen38ReasoningEffortFormatter(BaseReasoningEffortFormatter):
     profile = QWEN38
 
     def template_kwargs(self, effort: str) -> dict:
-        return {"reasoning_effort": effort, "enable_thinking": True, "preserve_thinking": True}
+        if effort not in ("low", "medium", "xhigh"):
+            raise ValueError(f"Unsupported Qwen output effort: {effort}")
+        return {"reasoning_effort": effort}
 
     def validate_rendered(self, text: str, canonical: dict, effort: str) -> None:
         expected = f"<think>\n{canonical['thinking']}\n</think>\n\n{canonical['answer'].strip()}<|im_end|>"
@@ -81,29 +91,6 @@ class Qwen38ReasoningEffortFormatter(BaseReasoningEffortFormatter):
 
 class LLMJP4ReasoningEffortFormatter(BaseReasoningEffortFormatter):
     profile = LLMJP4
-
-    def format(self, canonical: dict) -> dict:
-        record = super().format(canonical)
-        # Dataset schema and Transformers' input schema are different upstream.
-        # Keep the lossless adapter input alongside the native channel messages.
-        record["template_messages"] = record["messages"]
-        record["messages"] = [
-            {"role": "system", "name": None, "content": [{
-                "type": "system_content",
-                "model_identity": "You are LLM-jp-4, a large language model trained by LLM-jp.",
-                "reasoning_effort": record["reasoning_effort"].capitalize(),
-                "conversation_start_date": "2026-09-11", "knowledge_cutoff": "2025-12",
-                "channel_config": {"valid_channels": ["analysis", "commentary", "final"],
-                                   "channel_required": True},
-            }]},
-            {"role": "user", "name": None,
-             "content": [{"type": "text", "text": canonical["question"]}]},
-            {"role": "assistant", "name": None, "channel": "analysis",
-             "content": [{"type": "text", "text": canonical["thinking"]}]},
-            {"role": "assistant", "name": None, "channel": "final",
-             "content": [{"type": "text", "text": canonical["answer"]}]},
-        ]
-        return record
 
     def template_kwargs(self, effort: str) -> dict:
         # Fixed metadata avoids changing the serialized training text on resume.

@@ -12,6 +12,7 @@ sdg_loom`に進化しています。こちらも是非ともご覧ください�
 - `main_judge_eval_qa.py`: 評価用 Q&A と回答 JSONL を外部 LLM で LLM-as-a-Judge 採点
 - `main_create_cpt_dataset.py`: `asyncio.Queue` と `asyncio.create_task` による worker pool 方式で CPT データセットを逐次生成
 - `main_create_grpo_qa.py`: CPT 生成済み JSONL から GRPO 向け4択 Q&A データセットを生成
+- `main_create_reasoning_effort_dataset.py`: QAの質問・回答を固定し、effort別thinkingとQwen／llm-jp向けSFTデータセットを生成
 - `main_upload_dataset.py`: 生成済み CPT データセットを Hugging Face Hub にアップロード
 - `main_extract_wiki.py`: Wikipedia XML ダンプから特定キーワードを含む記事を抽出し JSONL に保存
 
@@ -40,6 +41,10 @@ Q&A 生成、今治弁変換、CPT データセット生成は OpenAI 互換 API
 - `main_judge_eval_qa.py`: 評価用 Q&A の LLM-as-a-Judge 実行スクリプト
 - `main_create_cpt_dataset.py`: CPT データセット生成の Queue / worker pool 非同期版実行スクリプト
 - `main_create_grpo_qa.py`: GRPO 向け4択 Q&A 生成の Queue / worker pool 非同期版実行スクリプト
+- `main_create_reasoning_effort_dataset.py`: Reasoning Effort生成CLI
+- `reasoning_effort/`: 共通thinkingの生成・検証、モデル別整形、キャッシュ・出力スキーマ・進捗表示
+- `migrate_reasoning_effort_output.py`: 単一の旧出力JSONLを新形式とresume情報へ変換
+- `migrate_reasoning_effort_directory.py`: 両モデル出力・キャッシュ・resume情報・失敗履歴をディレクトリ単位で移行・統合
 - `main_upload_dataset.py`: CPT データセットの Hugging Face Hub アップロードスクリプト
 - `main_extract_wiki.py`: Wikipedia XML ダンプから今治関連記事を抽出する実行スクリプト
 - `pipelines/imabarize_pipeline.py`: 今治弁変換の推論・保存処理
@@ -474,10 +479,10 @@ validated QA の question / answer を固定し、今治弁の thinking を cano
 
 ### 実行方法と設定
 
-新機能には `httpx`, `transformers`, `datasets`, `jinja2` が必要です。既存環境への依存追加は `pyproject.toml` に記載しています。リポジトリルートから実行してください。YAML内の相対パスも作業ディレクトリ基準です。
+この機能には `httpx`, `transformers`, `datasets`, `jinja2`, `pyyaml`, `tqdm` が必要です。既存環境への依存追加は `pyproject.toml` に記載しています。リポジトリルートから実行してください。YAML内の相対パスも作業ディレクトリ基準です。
 
 ```bash
-python main_create_reasoning_effort_dataset.py \
+uv run python main_create_reasoning_effort_dataset.py \
   -p ./yamls/create_reasoning_effort_dataset.yaml
 ```
 
@@ -496,8 +501,12 @@ generator:
   server_url: http://localhost:8000/v1
   model_name: Qwen3.8-27B
   api_key_env: OPENAI_API_KEY
-  generation: {max_tokens: 4096, temperature: 0.2, top_p: 0.95}
-  use_reasoning_effort: true
+  generation:
+    chat_template_kwargs: {enable_thinking: false}
+    max_tokens: 4096
+    temperature: 0.2
+    top_p: 0.95
+  use_reasoning_effort: false
   reasoning_effort_by_canonical: {low: low, medium: medium, high: xhigh}
 reasoning_effort:
   mode: expand_all
@@ -529,40 +538,67 @@ reasoning_effort:
 
 `thinking_generation.length_reference_tokenizer` のtoken数を `canonical_thinking_tokens` に記録し、effort別の `min_tokens` / `max_tokens` と照合します。各Datasetの `thinking_tokens` はそれぞれの対象Tokenizerで計測します。特殊トークンは計数に追加しません。文字数による代替はありません。
 
-Qwen / llm-jp の対応レコードは `source_qa_id`, `canonical_record_id`, `question`, `thinking`, `answer`, `canonical_reasoning_effort` を共有します。`qa_id` は canonical ID と対象familyから作ります。元IDを含むmetadataは `source_metadata` に保持し、`eval`, `source_files`, `chunk_index` 等も維持します。`keep_original_thinking: true` では `original_thinking` も保持します。
+Qwen / llm-jp の対応レコードは `source_qa_id`, `question`, `thinking`, `answer` を共有します。`qa_id` は内部canonical IDと対象familyから作ります。`source_metadata` は元QAの `qa_id`, `id`, `chunk_index` の３項目だけです。`original_thinking` は最終Datasetには保存しません。`keep_original_thinking` は内部レコードの保持設定として維持します。
 
-モデル差は `reasoning_effort`, `thinking_tokens`, `target_model_family`, `target_tokenizer`, `messages` 等に現れます。Formatterはthinking本文を書き換えません。
+最終Datasetのモデル差は `reasoning_effort`, `thinking_tokens`, `messages` とllm-jp専用の `chat_template_kwargs` に現れます。`target_model_family` は出力せず、familyは `qa_id` の末尾で識別します。`target_tokenizer` とrevisionはresume情報へ分離します。Formatterはthinking本文を書き換えません。
 
-- Qwen: `messages` のassistantに `reasoning_content: thinking`, `content: answer` を格納し、公式テンプレートが `<think>` wrapperを付けます。`chat_template_kwargs.reasoning_effort` を必ず学習時にも渡してください。mediumには独自directiveを追加しません。
-- llm-jp: 公開Datasetの構造に合わせ、`messages` にsystem metadata、user、analysis assistant、final assistantを格納します。contentはtext blockの配列です。公開Datasetではこの配列がJSON文字列として格納されていますが、本出力JSONLでは配列を直接保存します。
-- llm-jp の `template_messages` はTransformers用のadapter形式（assistantの `thinking` / `content`）です。`apply_chat_template(template_messages, add_generation_prompt=False, **chat_template_kwargs)` でanalysis / finalを生成します。native `messages` を直接Transformersへ渡さないでください。
-- 両Datasetの `text` は公式テンプレートで検証した学習用文字列です。llm-jpは公式Harmony parserでもtoken単位の往復確認を行います。再テンプレート化時は保存済みkwargsを使用します。`text` を学習する場合はチャットテンプレートを二重適用しないでください。
+トップレベルの `question`・`answer`・`thinking` と `messages` 内の同じ内容は、両方を保存する仕様です。この重複は旧形式が残っていることを意味しません。
+
+- Qwen: `messages` のassistantに `reasoning_content: thinking`, `content: answer` を格納し、公式テンプレートが `<think>` wrapperを付けます。トップレベルの `reasoning_effort` を必ず学習時にテンプレート引数として渡してください。mediumには独自directiveを追加しません。
+- llm-jp: `messages` は公式Tokenizerに渡せる２メッセージ形式です。userの `content` は質問の文字列、assistantは回答の `content` と推論本文の `thinking` を持ちます。systemやanalysis／finalの特殊トークンは公式テンプレートが生成します。
+- llm-jpは `chat_template_kwargs` にeffortと固定日付を保持します。`template_messages` は保存しません。
+- 両Datasetとも展開後の `text` は保存しません。messagesを正規のテンプレート入力として使い、question／answer／thinkingとの完全一致を検証します。生成時のテンプレート適用は一時的な整合性検証だけです。llm-jpのHarmony parser検証とモデル別thinking_tokens計算は維持します。
+
+学習時のテンプレート適用例（生成した文字列は学習側で使用）:
+
+```python
+# Qwen: デフォルトのthinking/preserve_thinkingを使用
+rendered = tokenizer.apply_chat_template(
+    record["messages"], tokenize=False, add_generation_prompt=False,
+    reasoning_effort=record["reasoning_effort"],
+)
+# LLM-jp: 固定日付も引き継ぐ
+rendered = tokenizer.apply_chat_template(
+    record["messages"], tokenize=False, add_generation_prompt=False,
+    **record["chat_template_kwargs"],
+)
+```
+
+共通生成のcanonicalラベルは既存どおりlow／medium／highです。Formatterの明示的な対応表はQwenでlow→low、medium→medium、high→xhigh、llm-jpで同名ラベルを維持します。これは以前からの生成ラベル対応であり、入力JSONLの誤ったhighを補正する規則ではありません。Qwen出力・移行時のreasoning_effortがhighならエラーにし、黙って変換しません。
+
 
 ### Cache / Resume / Failure
 
 形式と長さに合格したcanonicalだけをJSONL journalへfsync付きで保存します。cache keyはsource ID・QA内容・metadata・effort・生成モデル・プロンプト本文/version・検証条件を含み、対象モデル設定は含みません。同じcanonical cacheで出力対象を追加しても再推論しません。Formatterの追加は新規クラスとprofile登録で対応できます。
 
-同じCLI・設定で再実行すると、成功済みcanonicalを再検証して再利用します。対象ごとのJSONLに記録されたcanonical IDを成功statusとして扱い、未出力targetだけを再処理します。例えばQwen成功・llm-jp失敗なら、次回の生成呼び出しは0回でllm-jpのみ再試行します。Tokenizerを変更する場合は新しい出力パスを指定してください。
+同じCLI・設定で再実行すると、成功済みcanonicalを再検証して再利用します。対象ごとのJSONLの `qa_id`（旧形式はcanonical ID）を成功statusとして扱い、未出力targetだけを再処理します。新形式のTokenizer情報は `<出力パス>.resume.jsonl` に分離して保存し、このファイルも排他制御します。再開時には出力JSONLとresumeファイルをセットで保持してください。resumeファイルが欠損した新形式の行は、設定を推測してスキップせずfailureに記録します。例えばQwen成功・llm-jp失敗なら、次回の生成呼び出しは0回でllm-jpのみ再試行します。Tokenizerを変更する場合は新しい出力パスを指定してください。
 
 末尾の途中書込みは再開時に復旧します。中間行の破損は黙って無視せず停止します。出力パスの重複・入力との衝突を拒否し、ファイルロックで同一出力への並行実行を防止します。canonical cacheが後から破損した場合はそのレコードを失敗扱いにし、自動再生成しません。修復する場合は該当cacheと出力を確認してください。
 
-1件の生成・検証・Formatter・書込エラーで他レコードを停止しません。`failures_path` にsource ID、canonical ID、effort、`failed_step`, `format_errors`, `error` を記録します。全レコード処理後にsummaryを表示し、最終失敗が残ればCLIは終了コード1を返します。`generator_calls` は生成メソッド呼出数、`llm_inference_calls` は通信再試行を含むAPI要求数、`output_records` は再開前を含む出力総数です。
+1件の生成・検証・Formatter・書込エラーで他レコードを停止しません。`failures_path` にsource ID、canonical ID、effort、`failed_step`, `format_errors`, `error` を記録します。全レコード処理後にsummaryを表示し、その実行で最終失敗が1件以上あればCLIは終了コード1を返します。過去のfailure履歴は削除されず、後から成功したレコードの履歴も残ります。履歴の行数だけで現在の未解決件数や終了コードは決まりません。`generator_calls` は生成メソッド呼出数、`llm_inference_calls` は通信再試行を含むHTTP送信試行数（接続待ちで失敗した試行も含み、サーバーで実際に推論した回数とは限りません）、`output_records` は再開前を含む出力総数です。
 
 入力はHF streamingまたはローカルJSONLを有界windowで読み、Queue / worker pool、`max_in_flight`, `pipeline_batch_size`, httpx connection poolで処理します。生成APIはthinkingのみ要求し、返却contentを使用します。provider内部の非公開reasoningフィールドをfallbackとして保存しません。
 
 ### 検証とサンプル
 
+関連するテストは次のコマンドで実行できます。
+
 ```bash
-python -m unittest test.test_reasoning_effort_dataset -v
+uv run python -m unittest \
+  test.test_reasoning_effort_dataset \
+  test.test_reasoning_effort_source_context \
+  test.test_reasoning_effort_output \
+  test.test_reasoning_effort_progress -v
 # ダウンロード済み公式Tokenizerでの追加検証:
 REASONING_REAL_TOKENIZERS=/path/to/hf/cache \
-  python -m unittest test.test_reasoning_effort_dataset -v
-# Mock HTTP + 実Tokenizerの再現可能なサンプル:
-python examples/reasoning_effort_dataset/run_mock_sample.py \
-  --tokenizer-cache /path/to/hf/cache
+  uv run python -m unittest test.test_reasoning_effort_dataset -v
 ```
 
-[Mockサンプル](examples/reasoning_effort_dataset/sample_output/)には、3 API mock呼出しから生成した両モデル各3レコードと、読みやすい [thinking表示](examples/reasoning_effort_dataset/sample_output/thinking_samples.md) を収録しています。これは手書きfixtureによる構造検証で、実LLM推論結果ではありません。サンプルではtoken範囲を全effort 1〜4096へ広げています。通常のeffort別token範囲での実LLM品質検証とは区別してください。
+現行の出力形式は [構造化サンプルと説明](examples/reasoning_effort_dataset/structured_samples/REPORT.md) を参照してください。各モデル1件の固定fixtureで、実LLM生成ではありません。
+
+[旧Mockサンプル](examples/reasoning_effort_dataset/sample_output/)は、初期実装時の旧出力形式を残した資料です。3回のMock HTTP呼出しから両モデル各3件を作成した記録であり、現在の保存スキーマの見本には使わないでください。[thinking表示](examples/reasoning_effort_dataset/sample_output/thinking_samples.md) は本文の例として参照できます。token範囲は全effort 1〜4096へ広げた構造検証用です。
+
+`run_mock_sample.py` は現在の軽量出力から除去済みの `canonical_record_id`・`canonical_reasoning_effort` を出力レコードの比較で参照するため、新規出力での実行時に `KeyError` になる箇所が残っています。現行形式の検証には上記テストと構造化サンプルを使用してください。
 
 ### 仕様確認元・制約
 
@@ -574,7 +610,7 @@ python examples/reasoning_effort_dataset/run_mock_sample.py \
 - [入力validated QA](https://huggingface.co/datasets/ikedachin/imabari_wiki_qa_v4_validated): question/thinking/answer/messagesとMarkdown構造。
 - [Transformers chat template](https://huggingface.co/docs/transformers/chat_templating): 学習時は `add_generation_prompt=False`。
 
-構造Validatorは、自然な今治弁・事実の正しさ・意味的な水増し・見出しのない最終回答混入まで保証するものではありません。これらはプロンプトで制約し、実生成後の品質確認が必要です。contextを設定した場合は生成根拠として使い、出力のuser messageは元questionを維持します。ファイルロックはmacOS/Linuxの `fcntl` を使用します。既存lockfileは変更禁止のため更新していません。新依存の導入時は環境側で解決してください。
+構造Validatorは、自然な今治弁・事実の正しさ・意味的な水増し・見出しのない最終回答混入まで保証するものではありません。これらはプロンプトで制約し、実生成後の品質確認が必要です。contextを設定した場合は生成根拠として使い、出力のuser messageは元questionを維持します。ファイルロックはmacOS/Linuxの `fcntl` を使用します。`uv.lock` はGit管理対象外です。依存関係は `pyproject.toml` または `requirements.txt` に従って環境に導入してください。
 
 ### 元記事全文をQAのidで照合する設定
 
@@ -595,9 +631,9 @@ QA自身の識別子は引き続き `fields.id: qa_id`、記事との照合は `
 
 QAごとにeffort展開前に照合し、結合した全文を `generation_context` として3 effortのプロンプトへ共通で渡します。有効時はこの全文を優先し、無効時は従来の `fields.context` を使います。全文の要約・切捨ては行いません。APIの入力上限超過は生成失敗として記録し、他QAの処理を継続します。question、answer、出力messagesの仕様は維持します。
 
-容量を抑えるため、`generation_context` は新規のDataset・生成cacheには保存しません。元記事全文は生成プロンプトとcache keyの計算に使用し、記事id・本文ハッシュ等の `source_context_metadata` は保存します。旧cacheからDatasetを新規出力する場合も本文は除外します。すでに保存済みのファイルは自動で書き換えないため、既存行の容量は変わりません。
+容量を抑えるため、`generation_context` は新規のDataset・生成cacheには保存しません。元記事全文は生成プロンプトとcache keyの計算に使用し、記事id・本文ハッシュ等の `source_context_metadata` は内部生成cacheに保存します。旧cacheからDatasetを新規出力する場合も本文は除外します。すでに保存済みのファイルは自動で書き換えないため、既存行の容量は変わりません。
 
-`source_context_metadata` に記事id、参照ファイルのパス、全chunk番号、結合本文のSHA-256を保存します。全文とmetadataをcache keyへ反映するため、本文なしの旧cacheや変更前の本文のcacheは再利用しません。通常設定ではcache・両Dataset・failureのファイル名を `reasoning_effort_with_context` 系へ分離しており、旧成果物を保持します。同じ本文・設定での再開は推論0回です。
+内部生成cacheの `source_context_metadata` に記事id、参照ファイルのパス、全chunk番号、結合本文のSHA-256を保存します。最終Datasetには保存しません。全文とmetadataをcache keyへ反映するため、contextを使わずに生成した旧レコードや、本文・参照パスが異なるレコードとはキーが変わります。保存済みcacheから `generation_context` だけを除去してもキーを維持すれば、この除去自体は再利用を妨げません。通常設定ではcache・両Dataset・failureのファイル名を `reasoning_effort_with_context` 系へ分離しており、旧成果物を保持します。同じ本文・設定での再開は推論0回です。
 
 id不一致、QAのid欠損、記事の本文欠損・不正なchunk番号は、QA単位の `source_context_resolution` failureとし、effort展開も推論も行いません。記事の一部だけが欠損している場合も、残りのchunkだけで生成することはありません。参照ファイルの欠損、不正JSON、照合不能な元データ行のid欠損は生成開始前に停止します。参照元と出力のパス衝突も拒否します。
 
@@ -617,9 +653,19 @@ python -m unittest test.test_reasoning_effort_source_context -v
 
 実行中は `Thinking request`（QA ID・effort・試行番号）、`Thinking rejected`（検証段階・エラーコード）、`Thinking validated`（確定effort・token数）を逐次表示します。再試行上限に達した不合格文章はfailure JSONLの `rejected_thinking` に保存します。この文章は成功cacheやSFT Datasetには入りません。プロンプト・コード変更は、動作中のプロセスを停止して再実行すると反映されます。
 
-生成用Qwen3.8では、内部thinking有効時の実応答に先頭改行2文字が残るケースを確認しました。指示を強めても残ったため、既定設定は `generator.generation.chat_template_kwargs.enable_thinking: false` と `generator.use_reasoning_effort: false` にしています。生成モデル内部のthinkingを無効にし、提出用の今治弁Markdownをcontentへ直接生成します。Canonical low / medium / highの違いは各プロンプトで指示し、Dataset側のeffort mapping・thinking領域は維持します。これは出力対象Qwenの `enable_thinking: true` とは別設定です。
+生成用Qwen3.8では、内部thinking有効時の実応答に先頭改行2文字が残るケースを確認しました。指示を強めても残ったため、既定設定は `generator.generation.chat_template_kwargs.enable_thinking: false` と `generator.use_reasoning_effort: false` にしています。生成モデル内部のthinkingを無効にし、提出用の今治弁Markdownをcontentへ直接生成します。Canonical low / medium / highの違いは各プロンプトで指示し、Dataset側のeffort mapping・thinking領域は維持します。これは学習用Qwenテンプレートのthinking処理とは別設定です。現行FormatterはQwenへ `reasoning_effort` だけを渡し、thinking関連フラグは固定revisionのテンプレート既定値を使用します。
 
-長さの再試行では、エラーコードに加えてreference tokenizerによる前回の実測token数と許容範囲を返します。モデルが不足・超過の程度を判断できるようにします。検証失敗を無条件で成功扱いにすることはありません。
+長さの再試行では、エラーコードに加えてreference tokenizerによる前回の実測token数と許容範囲を返します。前回の生成本文は再送せず、元のプロンプトに最新の修正指示を付けて生成し直します。モデルが不足・超過の程度を判断できるようにします。検証失敗を無条件で成功扱いにすることはありません。
+
+### 通信失敗と並列数の確認
+
+`max_in_flight` はeffortジョブのworker数、`max_connections` はHTTP接続上限です。workerが接続上限を超えて動くと、余ったジョブは接続プールを待ちます。`pool_timeout` はこの待ち時間、`connect_timeout` は接続確立、`read_timeout` は応答の読み取り待ちに使われます。`read_timeout` を増やしても接続プール待ちの上限は変わりません。
+
+接続待ちが疑われる場合は、まずworker数を接続上限以下に下げて比較します。通信設定だけの変更はcanonical cache keyに含まれません。共有テンプレートは `max_in_flight: 8`・`max_connections: 16` ですが、ローカルYAMLの値は別途確認してください。
+
+`failed_step: generation` は生成処理中の例外、`thinking_format_validation`・`thinking_length_validation` は生成本文の検証失敗です。現状は例外の `str(exc)` のみを保存しており、通信例外によっては `error` が空文字になります。例外型や各通信試行の所要時間は記録しないため、空文字だけから `PoolTimeout` と断定できません。
+
+`max_retries: 3` は生成メソッド1回につき初回と追加3回までの送信試行を許します。対象HTTPステータスは408・409・425・429・500・502・503・504です。通信例外、空content、出力打切り等も再試行しますが、同じpayloadを使用し、自動で同時実行数やtoken上限は調整しません。形式・長さ検証の再試行はこれとは別枠です。
 
 ### ローカル実行設定とGit管理
 
@@ -631,3 +677,86 @@ cp -n yamls/create_reasoning_effort_dataset_settings_format.yaml \
 ```
 
 テストも共有テンプレートから設定を読み、ローカル実行設定には依存しません。`.env.*` は除外しますが、値を伏せた `.env.example` と `.env.sample` は共有できます。MockサンプルのJSONL・Markdownは共有し、実行時のロック・失敗ログは除外します。
+
+
+### Reasoning Effortの軽量出力と既存ファイルの移行
+
+実行中はターミナルの最下部にQA単位の進捗バーを表示します。既存のrequest・validated・rejectedログは `tqdm.write` でバーの上へ表示します。ローカルJSONLは最初に空行を除く行数を数え、不正JSON行も失敗として処理するため総数に含めます。Hugging Faceのストリーミングでは総数・割合・残り時間を推測せず、完了件数・経過時間・速度を表示します。
+
+１QAの全effortと対象出力の処理が終了した時点で完了数を増やします。再試行は完了数を増やさず、入力不備や最終失敗は処理完了に含めます。中断中のQAは完了扱いにしません。横の件数は「生成成功＝新たに検証を通過したcanonicalの処理件数」「cache再利用＝canonical再利用件数」「最終失敗＝入力・生成・対象出力での最終失敗件数」「実行中＝処理中のeffortジョブ数」です。単位が異なるため、これらを合計してもQA数にはなりません。summaryには `completed_qa` を追加します。
+
+標準エラーがターミナルでない場合はバーを無効にし、開始・終了時と処理中30秒ごとに通常の進捗ログを出します。既存の実行ログは引き続き表示し、この機能のログからANSI色制御文字を除きます。通常のターミナルでは約１秒ごとに状況を更新します。残り時間は参考値です。
+
+最終Datasetは次の許可リスト順で保存します。未知の元QA項目は追加されません。
+
+```text
+qa_id, source_qa_id, id, chunk_index, question, answer, thinking,
+reasoning_effort, eval, messages,
+chat_template_kwargs（llm-jpのみ）, thinking_tokens,
+thinking_generator, source_metadata
+```
+
+内部canonicalレコードと生成cache、failureログはこの許可リストの対象外です。messagesは両モデルで保存し、chat_template_kwargsはllm-jpのみ保存します。template_messagesとtextは保存しません。旧形式の既存行は自動変更せず、再開後に追加する行だけ新形式になります。
+
+#### 単一JSONLの移行
+
+1つのモデル出力を新しいパスへ変換するには、生成処理を終了してから次を実行してください。モデル種別はqa_idから自動判別するため、Qwen・llm-jp共通です。このコマンドはキャッシュや失敗履歴を移行しません。
+
+```bash
+uv run python migrate_reasoning_effort_output.py \
+  --file /path/old.jsonl \
+  --output /path/compact.jsonl
+```
+
+元ファイルは変更しません。既存の出力パスへの上書き、不正JSON、混在モデル、重複ID、必要な情報の欠損は拒否します。全行の確認後に新しいJSONLと `.resume.jsonl` を作成します。新形式を再変換する場合は、入力と同じ場所の `.resume.jsonl` も必要です。移行コードだけは旧形式のtemplate_messagesを読み取り、旧Harmony形式messagesからの移行を支援します。新規生成はmessagesを直接作り、template_messagesを経由しません。移行でもtext・template_messages・Qwenのchat_template_kwargsを除外します。TokenizerやLLMを呼ばず、質問・回答・thinking等は変更しません。
+
+変換先で生成を再開する場合は、YAMLの対象出力パスを変換先に変更し、従来の生成cacheパス・生成設定を維持してください。変換先の `.resume.jsonl` も一緒に保持します。Qwenとllm-jpはそれぞれ別ファイルへ変換してください。学習自体にはresumeファイルは不要です。
+
+
+#### ディレクトリ全体の移行・統合
+
+[migrate_reasoning_effort_directory.py](migrate_reasoning_effort_directory.py) は、次の固定ファイル名を扱う一時移行ツールです。YAMLは読み取りません。共有設定テンプレートの出力ファイル名とは異なるため、対象ディレクトリ内の名前を確認してください。
+
+| ファイル | 移行内容 |
+| --- | --- |
+| `qwen38.jsonl`・`llmjp4.jsonl` | 軽量出力へ変換し、既存の新側データと統合 |
+| 各出力の `.resume.jsonl` | canonical ID・Tokenizer名・revisionを保存 |
+| `.generation_cache.jsonl` | キー・本文・内部metadataを保持し、トップレベルの `generation_context` を除去 |
+| `failures.jsonl` | 失敗履歴を統合し、JSON値が完全一致する重複だけ除去 |
+
+入力側は両モデルの出力とキャッシュが必須です。新形式の入力には隣接するresume情報も必要です。旧側と新側に同じcanonical IDがある場合は新側を優先します。統合後の出力とキャッシュについてQA ID・質問・回答・thinking・effortの一致を検査し、不一致や対応するキャッシュの欠落はエラーにします。入力JSONL内の出力ID重複も拒否します。
+
+生成処理を停止し、リポジトリルートから実行します。次は検証のみです。
+
+```bash
+uv run python migrate_reasoning_effort_directory.py \
+  --source ./test_output/reasoning_effort_with_context_old \
+  --destination ./test_output/reasoning_effort_with_context
+```
+
+反映する場合は `--apply` を追加します。
+
+```bash
+uv run python migrate_reasoning_effort_directory.py \
+  --source ./test_output/reasoning_effort_with_context_old \
+  --destination ./test_output/reasoning_effort_with_context \
+  --apply
+```
+
+上記2ディレクトリは既定値なので、パス引数は省略できます。`--apply` がない場合も出力ディレクトリ・ロックファイルと一時作業領域は作成しますが、対象JSONLを置換しません。入力・出力は別ディレクトリで、相互に包含しない必要があります。
+
+反映時は新側の `migration-backup-日時-識別子/` に反映前のファイル、`manifest.json`、変換済み一式の `prepared/` を保存してから対象ファイルを置換します。旧側のデータ本文は変更しません。同じ入力で再実行しても出力IDや完全一致の失敗履歴は増えませんが、`--apply` ごとにバックアップを作成します。
+
+置換はファイルごとです。捕捉できる置換エラーでは反映済みファイルを戻しますが、強制終了・電源断を含むディレクトリ全体の一括更新は保証しません。復元時は生成処理を止め、manifestの `previous_files` とバックアップ一式を照合してください。ロックファイルの存在だけは実行中を意味せず、OSのロック取得に失敗した場合に移行を停止します。
+
+移行ではLLM・Tokenizerを呼ばず、token数の再計測や事実性・方言品質の再評価はしません。キャッシュキーも再計算しないため、生成設定・プロンプト・元記事が変わった場合のキャッシュヒットは保証しません。移行後はYAMLの両出力・cache・failureパスを移行先に合わせ、resume情報も保持して再開してください。成功済みQAの過去の失敗履歴が残るのは仕様です。
+
+#### 進捗表示の切り替え
+
+
+進捗表示は環境変数 `REASONING_PROGRESS=auto|bar|log` で選択できます（既定はauto）。autoは標準エラーの端末判定を使うため、標準出力だけを `tee` に渡してもバーを表示します。端末判定が得られない場合はbar、通常ログのみの場合はlogを指定してください。総件数不明の場合はbar指定でも割合は表示しません。
+
+```bash
+REASONING_PROGRESS=bar uv run python main_create_reasoning_effort_dataset.py \
+  --settings_path ./yamls/create_reasoning_effort_dataset.yaml
+```
