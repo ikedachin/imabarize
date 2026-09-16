@@ -11,7 +11,8 @@ def stable_id(value: Any) -> str:
 
 
 class JsonlJournal:
-    def __init__(self, path: str | Path):
+    def __init__(self, path: str | Path, *, key_resolver=None):
+        self.key_resolver = key_resolver
         self.path = Path(path).expanduser().resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.records: dict[str, dict] = {}
@@ -31,7 +32,7 @@ class JsonlJournal:
                             raise ValueError(f"Corrupt journal at {self.path}:{offset}")
                         stream.truncate(offset)
                         break
-                    key = self.record_key(record)
+                    key = self.key_resolver(record) if self.key_resolver else self.record_key(record)
                     if key:
                         self.records[key] = record
                     if not line.endswith(b"\n"):
@@ -40,7 +41,7 @@ class JsonlJournal:
                         stream.flush()
                         os.fsync(stream.fileno())
 
-    def append(self, record: dict, key: str | None = None) -> None:
+    def append(self, record: dict, key: str | None = None, *, index_key: str | None = None) -> None:
         value = dict(record)
         if key:
             value["journal_key"] = key
@@ -49,7 +50,7 @@ class JsonlJournal:
             stream.write(data)
             stream.flush()
             os.fsync(stream.fileno())
-        index = key or self.record_key(value)
+        index = index_key or key or (self.key_resolver(value) if self.key_resolver else self.record_key(value))
         if index:
             self.records[index] = value
 

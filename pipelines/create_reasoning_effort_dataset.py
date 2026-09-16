@@ -11,7 +11,7 @@ from commons.utils_msg import msg_info
 
 from reasoning_effort.cache import JsonlJournal, stable_id
 from reasoning_effort.formatters import FORMATTERS
-from reasoning_effort.output_schema import compact_output
+from reasoning_effort.output_schema import compact_output, output_family
 from reasoning_effort.progress import QAProgress, write_log
 from reasoning_effort.generator import OUTPUT_CONTRACT, ThinkingGenerator
 from reasoning_effort.source_context import SourceContextIndex
@@ -109,13 +109,37 @@ class ReasoningEffortDatasetPipeline:
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             self.cache = JsonlJournal(paths[0])
             self.failures = JsonlJournal(paths[1])
-            self.outputs = {f: JsonlJournal(output[f]["path"]) for f in enabled}
-            self.output_metadata = {f: JsonlJournal(str(j.path) + '.resume.jsonl')
-                                    for f, j in self.outputs.items()}
+            self.output_metadata = {f: JsonlJournal(str(Path(output[f]["path"]).expanduser().resolve()) + '.resume.jsonl')
+                                    for f in enabled}
+            self.outputs = {f: JsonlJournal(output[f]["path"], key_resolver=self._output_key_resolver(f))
+                            for f in enabled}
+
         except Exception:
             for lock in self._file_locks:
                 lock.close()
             raise
+
+    def _output_key_resolver(self, family):
+        digest_keys = {}
+        for key, metadata in self.output_metadata[family].records.items():
+            digest = metadata.get('output_digest')
+            if digest:
+                if digest in digest_keys and digest_keys[digest] != key:
+                    raise ValueError('Ambiguous output resume metadata')
+                digest_keys[digest] = key
+        def resolve(record):
+            digest, detected = output_family(record)
+            if detected != family:
+                raise ValueError('Output model family mismatch')
+            legacy = JsonlJournal.record_key(record)
+            if legacy is not None:
+                if 'target_tokenizer' not in record and legacy not in self.output_metadata[family].records:
+                    raise ValueError('Missing output resume metadata; restore the .resume.jsonl file')
+                return legacy
+            if digest in digest_keys:
+                return digest_keys[digest]
+            raise ValueError('Missing output resume metadata; restore the .resume.jsonl file')
+        return resolve
 
     def _load_tokenizers(self) -> None:
         if self.reference_tokenizer is not None and self.formatters is not None:
@@ -309,10 +333,11 @@ class ReasoningEffortDatasetPipeline:
                         exported = compact_output(record)
                         self.output_metadata[family].append({
                             'canonical_record_id': key,
+                            'output_digest': output_family(exported)[0],
                             'target_tokenizer': formatter.tokenizer_name,
                             'target_tokenizer_revision': formatter.revision,
                         })
-                        journal.append(exported)
+                        journal.append(exported, index_key=key)
                         self.stats[family + "_written"] += 1
                     except Exception as exc:
                         self._failure(source, key, canonical["canonical_reasoning_effort"], target_step, exc)

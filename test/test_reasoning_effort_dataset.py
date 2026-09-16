@@ -155,10 +155,12 @@ class PipelineTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(g.peak, 2)
         for key, q in p.outputs['qwen3_8'].records.items():
             j = p.outputs['llm_jp_4'].records[key]
-            for field in ('source_qa_id', 'question', 'thinking', 'answer'):
+            for field in ('question', 'thinking', 'answer'):
                 self.assertEqual(q[field], j[field])
             self.assertEqual(q['source_metadata'], {k: ROW.get(k) for k in ('qa_id', 'id', 'chunk_index')})
-            self.assertEqual(q['qa_id'], key + ':qwen3_8')
+            for record in (q, j):
+                for field in ('source_qa_id', 'id', 'chunk_index'):
+                    self.assertNotIn(field, record)
             self.assertEqual(j['reasoning_effort'], p.cache.records[key]['canonical_reasoning_effort'])
             self.assertEqual(q['reasoning_effort'], {'low': 'low', 'medium': 'medium', 'high': 'xhigh'}[j['reasoning_effort']])
             self.assertEqual(j['thinking_tokens'], q['thinking_tokens'] * 2)
@@ -378,8 +380,8 @@ class RealTokenizerTests(unittest.TestCase):
     def test_official_templates_all_efforts(self):
         from transformers import AutoTokenizer
         cache = os.environ['REASONING_REAL_TOKENIZERS']
-        q = AutoTokenizer.from_pretrained('Qwen/Qwen3.8-27B', cache_dir=cache, local_files_only=True)
-        j = AutoTokenizer.from_pretrained('llm-jp/llm-jp-4-8b-thinking', cache_dir=cache, local_files_only=True, trust_remote_code=True)
+        q = AutoTokenizer.from_pretrained('Qwen/Qwen3.8-27B', cache_dir=cache, local_files_only=True, revision='1d4bf0f2ff6012fd82039f2fa52739d0dd7c60c0')
+        j = AutoTokenizer.from_pretrained('llm-jp/llm-jp-4-8b-thinking', cache_dir=cache, local_files_only=True, trust_remote_code=True, revision='fc7c15c262710016c19bcda4372a96ff68875846')
         for effort in ('low', 'medium', 'high'):
             canonical = dict(ROW, thinking=THINKING, canonical_reasoning_effort=effort, canonical_record_id='sample')
             qr = Qwen38ReasoningEffortFormatter(q, 'qwen').format(canonical)
@@ -387,9 +389,10 @@ class RealTokenizerTests(unittest.TestCase):
             self.assertEqual(qr['thinking'], jr['thinking'])
             self.assertEqual(qr['thinking_tokens'], len(q.encode(THINKING, add_special_tokens=False)))
             self.assertEqual(jr['thinking_tokens'], len(j.encode(THINKING, add_special_tokens=False)))
-            jt = j.apply_chat_template(jr['messages'], tokenize=False, add_generation_prompt=False, **jr['chat_template_kwargs'])
             qt = q.apply_chat_template(qr['messages'], tokenize=False, add_generation_prompt=False, reasoning_effort=qr['reasoning_effort'])
-            self.assertIn('<|channel|>analysis', jt)
+            self.assertEqual(jr['messages'][1]['thinking'], THINKING)
+            jt = j.apply_chat_template(jr['messages'], tokenize=False, add_generation_prompt=False, **jr['chat_template_kwargs'])
+            self.assertIn('<|channel|>analysis<|message|>' + THINKING, jt)
             self.assertIn('<think>', qt)
             self.assertEqual(qt, q.apply_chat_template(qr['messages'], tokenize=False,
                 add_generation_prompt=False, reasoning_effort=qr['reasoning_effort'],
@@ -397,11 +400,10 @@ class RealTokenizerTests(unittest.TestCase):
             for r in (qr, jr):
                 self.assertNotIn('text', r)
                 self.assertNotIn('template_messages', r)
-            self.assertNotIn('chat_template_kwargs', qr)
-            self.assertEqual(jr['messages'], [
-                {'role': 'user', 'content': ROW['question']},
-                {'role': 'assistant', 'content': ROW['answer'], 'thinking': THINKING},
-            ])
+            self.assertIs(qr['chat_template_kwargs']['preserve_thinking'], True)
+            from reasoning_effort.output_schema import validate_llmjp_messages
+            validate_llmjp_messages(jr)
+
 
 
 

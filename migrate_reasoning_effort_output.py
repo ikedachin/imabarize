@@ -2,7 +2,12 @@
 # requires-python = ">=3.11"
 # dependencies = []
 # ///
-"""Convert a completed reasoning export into a NEW compact JSONL and resume sidecar."""
+"""One-off conversion of legacy Qwen/LLM-jp JSONL to the current output schema.
+
+Uses only the Python standard library and local schema helpers; no inference or
+tokenizer downloads. Keep the input .resume.jsonl beside the input JSONL when
+the legacy export omits canonical IDs or tokenizer metadata.
+"""
 import argparse
 import fcntl
 import json
@@ -10,10 +15,10 @@ import os
 from pathlib import Path
 import tempfile
 
-from reasoning_effort.output_schema import compact_output, output_family
+from reasoning_effort.output_schema import compact_output, output_family, llmjp_messages, validate_llmjp_messages, template_kwargs
 
 
-def migrate(source: Path, destination: Path) -> int:
+def migrate(source: Path, destination: Path, *, messages_only=False) -> int:
     source = source.expanduser().resolve(strict=True)
     destination = destination.expanduser().resolve()
     sidecar = Path(str(destination) + '.resume.jsonl')
@@ -34,6 +39,10 @@ def migrate(source: Path, destination: Path) -> int:
             for line in source_sidecar.read_text(encoding='utf-8').splitlines():
                 row = json.loads(line)
                 metadata[row['canonical_record_id']] = row
+        metadata_by_digest = {}
+        for entry in metadata.values():
+            if entry.get('output_digest'):
+                metadata_by_digest.setdefault(entry['output_digest'], []).append(entry)
         count, family, seen = 0, None, set()
         with tempfile.NamedTemporaryFile(mode='w', encoding='utf-8', dir=destination.parent,
                                          delete=False) as out, tempfile.NamedTemporaryFile(
@@ -45,19 +54,29 @@ def migrate(source: Path, destination: Path) -> int:
                     try:
                         row = json.loads(line)
                         key, detected = output_family(row)
+                        if 'qa_id' not in row:
+                            matches = metadata_by_digest.get(key, [])
+                            if len(matches) != 1:
+                                raise ValueError('Missing or ambiguous output resume metadata')
+                            key = matches[0]['canonical_record_id']
                         if family is not None and family != detected:
                             raise ValueError('Qwenとllm-jpが混在しています')
                         family = detected
                         if key in seen:
                             raise ValueError('重複したqa_idです')
                         seen.add(key)
-                        # Only legacy migration reads the obsolete adapter field.
-                        if detected == 'llm_jp_4' and any(
-                            isinstance(m, dict) and ('channel' in m or isinstance(m.get('content'), list))
-                            for m in row.get('messages', [])
-                        ):
-                            row = dict(row, messages=row.get('template_messages'))
-                        compact = compact_output(row)
+                        if detected == 'llm_jp_4':
+                            row = dict(row, messages=llmjp_messages(row))
+                            validate_llmjp_messages(row)
+                        if messages_only:
+                            # Validate without using the compacted result: every other
+                            # key (including unknown legacy metadata) must survive.
+                            compact_output(dict(row, qa_id=f"{key}:{detected}",
+                                                chat_template_kwargs=template_kwargs(detected, row["reasoning_effort"])))
+                            compact = row
+                        else:
+                            compact = compact_output(dict(row, qa_id=f"{key}:{detected}",
+                                chat_template_kwargs=template_kwargs(detected, row["reasoning_effort"])))
                         info = row if 'target_tokenizer' in row else metadata.get(key, {})
                         if not info.get('target_tokenizer') or not info.get('target_tokenizer_revision'):
                             raise ValueError('Tokenizer情報がありません。新形式の場合は元の.resume.jsonlも必要です')
@@ -66,6 +85,7 @@ def migrate(source: Path, destination: Path) -> int:
                         out.write(json.dumps(compact, ensure_ascii=False, allow_nan=False) + '\n')
                         meta.write(json.dumps({
                             'canonical_record_id': key,
+                            'output_digest': output_family(compact)[0],
                             'target_tokenizer': info['target_tokenizer'],
                             'target_tokenizer_revision': info['target_tokenizer_revision'],
                         }, ensure_ascii=False, allow_nan=False) + '\n')
@@ -97,9 +117,13 @@ def migrate(source: Path, destination: Path) -> int:
 
 
 def main():
-    parser = argparse.ArgumentParser(description='既存Reasoning Effort JSONLを新しいファイルへ軽量化します。元ファイルは変更しません。')
-    parser.add_argument('--file', type=Path, required=True)
-    parser.add_argument('--output', type=Path, required=True)
+    parser = argparse.ArgumentParser(
+        description='一時変換用: Qwen3.8／llm-jp-4の旧JSONLを新フォーマットへ変換します。元ファイルは変更しません。',
+        epilog='モデルは自動判別します。ID・Tokenizer情報が省略された旧出力には、隣接する <入力>.resume.jsonl が必要です。'
+               'LLM・Tokenizerは呼び出さず、thinking_tokensも保持します。',
+    )
+    parser.add_argument('--file', type=Path, required=True, help='変換元JSONL（1ファイルにつき1モデル）')
+    parser.add_argument('--output', type=Path, required=True, help='未使用の出力JSONLパス。対応する.resume.jsonlも作成')
     args = parser.parse_args()
     try:
         count = migrate(args.file, args.output)
