@@ -7,6 +7,13 @@
 Uses only the Python standard library and local schema helpers; no inference or
 tokenizer downloads. Keep the input .resume.jsonl beside the input JSONL when
 the legacy export omits canonical IDs or tokenizer metadata.
+
+HOW TO USE:
+```
+python3 migrate_reasoning_effort_output.py \
+  --file /path/to/old.jsonl \
+  --output /path/to/new.jsonl
+```
 """
 import argparse
 import fcntl
