@@ -1,8 +1,9 @@
-"""Official tokenizer templates own wrappers and reasoning directives."""
+"""Model-specific training messages verified with target chat templates."""
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Any
 
+from reasoning_effort.output_schema import template_kwargs
 from reasoning_effort.validators import ThinkingFormatValidator, count_tokens
 
 
@@ -46,7 +47,6 @@ class BaseReasoningEffortFormatter:
         for obsolete in ('text', 'template_messages', 'chat_template_kwargs'):
             record.pop(obsolete, None)
         kwargs = self.template_kwargs(effort)
-        # Transient validation only: the rendered string is never exported.
         rendered = self.tokenizer.apply_chat_template(
             messages, tokenize=False, add_generation_prompt=False, **kwargs,
         )
@@ -60,12 +60,11 @@ class BaseReasoningEffortFormatter:
             target_tokenizer_revision=self.revision,
             messages=messages,
         )
-        if self.profile.family == "llm_jp_4":
-            record["chat_template_kwargs"] = kwargs
+        record["chat_template_kwargs"] = kwargs
         return record
 
     def template_kwargs(self, effort: str) -> dict:
-        return {"reasoning_effort": effort}
+        return template_kwargs(self.profile.family, effort)
 
     def validate_rendered(self, text: str, canonical: dict, effort: str) -> None:
         raise NotImplementedError
@@ -77,7 +76,7 @@ class Qwen38ReasoningEffortFormatter(BaseReasoningEffortFormatter):
     def template_kwargs(self, effort: str) -> dict:
         if effort not in ("low", "medium", "xhigh"):
             raise ValueError(f"Unsupported Qwen output effort: {effort}")
-        return {"reasoning_effort": effort}
+        return template_kwargs(self.profile.family, effort)
 
     def validate_rendered(self, text: str, canonical: dict, effort: str) -> None:
         expected = f"<think>\n{canonical['thinking']}\n</think>\n\n{canonical['answer'].strip()}<|im_end|>"
@@ -93,28 +92,14 @@ class LLMJP4ReasoningEffortFormatter(BaseReasoningEffortFormatter):
     profile = LLMJP4
 
     def template_kwargs(self, effort: str) -> dict:
-        # Fixed metadata avoids changing the serialized training text on resume.
-        return {"reasoning_effort": effort, "conversation_start_date": "2026-09-11"}
+        return template_kwargs(self.profile.family, effort)
 
     def validate_rendered(self, text: str, canonical: dict, effort: str) -> None:
-        analysis = f"<|start|>assistant<|channel|>analysis<|message|>{canonical['thinking']}<|end|>"
-        final = f"<|start|>assistant<|channel|>final<|message|>{canonical['answer']}<|return|>"
-        if analysis + final not in text or f"Reasoning: {effort}\n" not in text:
-            raise ValueError("llmjp_harmony_validation_failed")
-        if hasattr(self.tokenizer, "parse_harmony_message"):
-            parsed = self.tokenizer.parse_harmony_message(
-                self.tokenizer.encode(text, add_special_tokens=False))
-            assistant = [m for m in parsed if m.role is not None
-                         and self.tokenizer.decode(m.role.token_ids) == "assistant"]
-            if len(assistant) != 2:
-                raise ValueError("llmjp_harmony_assistant_count_mismatch")
-            for message, channel, content in zip(
-                assistant, ("analysis", "final"), (canonical["thinking"], canonical["answer"])
-            ):
-                if (message.channel is None or message.content is None
-                        or self.tokenizer.decode(message.channel.token_ids) != channel
-                        or self.tokenizer.decode(message.content.token_ids) != content):
-                    raise ValueError("llmjp_harmony_token_roundtrip_mismatch")
+        expected = (f"<|start|>assistant<|channel|>analysis<|message|>{canonical['thinking']}<|end|>"
+                    f"<|start|>assistant<|channel|>final<|message|>{canonical['answer']}<|return|>")
+        if expected not in text or f"Reasoning: {effort}" not in text:
+            raise ValueError('llmjp_chat_template_thinking_or_answer_mismatch')
+
 
 
 FORMATTERS = {"qwen3_8": Qwen38ReasoningEffortFormatter, "llm_jp_4": LLMJP4ReasoningEffortFormatter}

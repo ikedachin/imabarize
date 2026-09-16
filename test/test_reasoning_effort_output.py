@@ -47,7 +47,7 @@ class CompactOutputTests(unittest.IsolatedAsyncioTestCase):
                     for key, record in journal.records.items():
                         original = p.formatters[family].format(p.cache.records[key])
                         legacy[family].append(original)
-                        self.assertEqual(list(record), [k for k in OUTPUT_KEYS if k != 'chat_template_kwargs' or family == 'llm_jp_4'])
+                        self.assertEqual(list(record), list(OUTPUT_KEYS))
                         self.assertEqual(record['source_metadata'], {'qa_id': ROW['qa_id'], 'id': 123, 'chunk_index': 2})
                         self.assertNotIn('original_thinking', record)
                         for field in ('messages', 'question', 'answer', 'thinking'):
@@ -62,7 +62,7 @@ class CompactOutputTests(unittest.IsolatedAsyncioTestCase):
                                 messages=[{'role': 'assistant', 'channel': 'analysis',
                                            'content': [{'type': 'text', 'text': original['thinking']}]}])
                         else:
-                            self.assertNotIn('chat_template_kwargs', record)
+                            self.assertEqual(record['chat_template_kwargs'], {'reasoning_effort': record['reasoning_effort'], 'enable_thinking': True, 'preserve_thinking': True})
                             self.assertIn(record['reasoning_effort'], ('low', 'medium', 'xhigh'))
                 paths = {f: j.path for f, j in p.outputs.items()}
             finally:
@@ -130,11 +130,48 @@ class CompactOutputTests(unittest.IsolatedAsyncioTestCase):
                 for journal in p.outputs.values():
                     for record in journal.records.values():
                         self.assertNotIn('original_thinking', record)
-                        for field in ('id', 'eval', 'chunk_index'):
-                            self.assertIsNone(record[field])
+                        self.assertIsNone(record['eval'])
+                        for field in ('source_qa_id', 'id', 'chunk_index'):
+                            self.assertNotIn(field, record)
                         self.assertEqual(record['source_metadata'], dict(qa_id=None, id=None, chunk_index=None))
             finally:
                 await p.aclose()
+
+    async def test_identifier_removal_migration_and_resume_both_models(self):
+        with tempfile.TemporaryDirectory() as directory:
+            cfg = settings(directory)
+            p = pipeline(cfg)
+            try:
+                await p.run([ROW])
+            finally:
+                await p.aclose()
+            for family in ('qwen3_8', 'llm_jp_4'):
+                source = Path(cfg['output'][family]['path'])
+                original = [json.loads(line) for line in source.read_text().splitlines()]
+                dest = source.with_name('deduplicated-' + source.name)
+                migrate(source, dest)
+                self.assertEqual(original, [json.loads(line) for line in dest.read_text().splitlines()])
+                for row in original:
+                    for field in ('source_qa_id', 'id', 'chunk_index'):
+                        self.assertNotIn(field, row)
+                    self.assertEqual(row['source_metadata'], {'qa_id': ROW['qa_id'], 'id': None, 'chunk_index': 2})
+                cfg['output'][family]['path'] = str(dest)
+            resumed = pipeline(cfg)
+            try:
+                await resumed.run([ROW])
+                self.assertEqual(resumed.generator.calls, [])
+                for family in ('qwen3_8', 'llm_jp_4'):
+                    self.assertEqual(resumed.stats[family + '_skipped'], 3)
+                    self.assertEqual(len(resumed.outputs[family].records), 3)
+            finally:
+                await resumed.aclose()
+            # Missing metadata must stop before generation or duplicate writes.
+            path = Path(cfg['output']['qwen3_8']['path'])
+            before = path.read_bytes()
+            Path(str(path) + '.resume.jsonl').unlink()
+            with self.assertRaisesRegex(ValueError, 'Missing output resume metadata'):
+                pipeline(cfg)
+            self.assertEqual(path.read_bytes(), before)
 
     async def test_migration_failure_leaves_no_output(self):
         with tempfile.TemporaryDirectory() as directory:

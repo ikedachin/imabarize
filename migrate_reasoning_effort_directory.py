@@ -83,8 +83,12 @@ def build(source, destination, stage):
                 continue
             converted = stage / f'{index}-{name}'
             migrate(path, converted)
+            converted_meta = list(read_rows(Path(str(converted) + '.resume.jsonl')))
+            digest_keys = {m.get('output_digest'): m['canonical_record_id'] for m in converted_meta}
             for row in read_rows(converted):
                 key, family = output_family(row)
+                if 'qa_id' not in row:
+                    key = digest_keys[key]
                 if family != expected_family:
                     raise ValueError(f'{path}: unexpected model family {family}')
                 outputs[key] = row
@@ -94,9 +98,12 @@ def build(source, destination, stage):
             canonical = cache.get(key)
             if canonical is None:
                 raise ValueError(f'{name}: missing canonical cache: {key}')
-            for field in ('source_qa_id', 'question', 'answer', 'thinking'):
+            for field in ('question', 'answer', 'thinking'):
                 if row[field] != canonical[field]:
                     raise ValueError(f'{name}: cache/output conflict: {key}: {field}')
+            if row['source_metadata'] != {field: canonical.get('source_metadata', {}).get(field)
+                                          for field in ('qa_id', 'id', 'chunk_index')}:
+                raise ValueError(f'{name}: cache/output source_metadata conflict: {key}')
             effort = canonical['canonical_reasoning_effort']
             expected = 'xhigh' if expected_family == 'qwen3_8' and effort == 'high' else effort
             if row['reasoning_effort'] != expected:
