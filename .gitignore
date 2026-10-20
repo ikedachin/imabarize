@@ -42,3 +42,7 @@ test_source/wiki/*
 
 # Huggingface uploader
 upload_imabari_qa_v4_to_huggingface.ipynb
+
+
+# temp programs
+temporary_tools/**
