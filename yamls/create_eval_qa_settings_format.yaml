@@ -25,20 +25,16 @@ batch_size: 8
 # ------------------------------------
 # Evaluation dataset settings
 # ------------------------------------
-# sample_size を指定すると、未処理候補から最大件数を seed 固定でサンプリングします。
-# null または 0 以下の場合は全件処理します。
-sample_size: 100
+# 全ソースの有効な項目から固定シードで最大件数を抽出。null または 0 以下で全件。
+sample_size: 300
 seed: 42
 
 # ------------------------------------
 # Prompts
 # ------------------------------------
 prompts:
-  - question_prompt: ./prompts/create_qa/qa_create_question.md
-  - thinking_prompt: ./prompts/create_qa/qa_create_thinking.md
-  - answer_prompt: ./prompts/create_qa/qa_create_answer.md
-  - refine_answer_prompt: ./prompts/create_qa/qa_refine_answer.md
-  - eval_prompt: ./prompts/create_qa/eval.md
+  - question_prompt: ./prompts/create_eval_qa/qa_create_question.md
+  - answer_prompt: ./prompts/create_eval_qa/qa_create_answer.md
 
 # ------------------------------------
 # Output
@@ -69,6 +65,3 @@ http2: false
 thinking_enabled_by_step:
   question: false
   answer: false
-  thinking: true
-  refine_answer: false
-  eval: false

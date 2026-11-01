@@ -31,7 +31,7 @@ cp -n yamls/create_reasoning_effort_dataset_settings_format.yaml yamls/create_re
 
 ## 評価用 Q&A データセット生成
 
-評価用 Q&A は既存の Q&A JSONL と同じ形式で出力します。実装は `main_create_imabari_qa.py` と同じ worker pool 型の生成処理を使い、評価用途の設定テンプレートを分けています。
+評価用 Q&A は、質問と今治弁の回答を JSONL に出力します。質問文に必要な条件を含む、多段推論の問題を生成します。思考過程は生成・出力しません。
 
 設定テンプレートをコピーして編集:
 
@@ -48,7 +48,7 @@ uv run python main_create_eval_qa.py \
   -t context
 ```
 
-作成件数は YAML の `sample_size` で指定できます。`sample_size: 100` なら未処理候補から最大100件を `seed` 固定でサンプリングします。CLI で一時的に上書きする場合は `-n` / `--sample_size` を使います。
+作成件数は YAML の `sample_size` で指定できます。既定の `sample_size: 300` では、テキスト・Markdown はファイル単位、JSON/JSONL は有効な行単位で全候補を合わせ、`seed: 42` で最大300件を抽出します。CLI で一時的に上書きする場合は `-n` / `--sample_size` を使います。
 
 ```bash
 uv run python main_create_eval_qa.py \
@@ -58,7 +58,11 @@ uv run python main_create_eval_qa.py \
   -n 50
 ```
 
-`sample_size` を `null` または 0 以下にすると全件処理します。出力先は YAML の `output_path` で指定します。出力レコードは `qa_id` / `id` / `chunk_index` / `source_files` / `question` / `thinking` / `answer` / `eval` / `qa_generator` / `messages` を持つ既存 Q&A 互換 JSONL です。`qa_id` はQ&Aレコードの生成時に割り当てる一意な UUIDv4 です。同じ `id + chunk_index` や同じ内容のレコードも、それぞれ異なる `qa_id` を持ちます。JSON/JSONL 入力では `id` と `chunk_index` を組み合わせた cache key で再実行済みレコードをスキップします。
+`sample_size` を `null` または 0 以下にすると全件処理します。出力先は YAML の `output_path` で指定します。出力レコードには `qa_id` / `id` / `chunk_index` / `source_files` / `question` / `answer` / `qa_generator` / `messages` が含まれます。`messages` の回答にも `<think>` は含まれません。
+
+同じ入力、件数、シード、出力先で再実行すると、同じ候補を抽出して成功済みの項目を `cache_eval_qa.txt` でスキップし、失敗項目を再試行します。`-i` は抽出後の並びの1始まりの開始位置です。入力ファイルや行の順序を変更すると抽出結果が変わるため、再開時には変更しないでください。別のデータセットを作るときは新しい `output_path` を使ってください。
+
+件数は生成を試みるソースの上限です。情報不足や生成失敗は `*.failures.jsonl` に記録され、成功件数が指定数に満たない場合があります。多段推論や方言の品質はモデルに依存するため、生成結果の確認が必要です。
 
 ## LLM-as-a-Judge 評価
 
