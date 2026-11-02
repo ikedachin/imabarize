@@ -501,3 +501,51 @@ uv run python tool_delete_generation_context.py \
 ```
 
 不正JSONやJSONオブジェクト以外の行があれば置換せず停止します。対象キーがない行は保持します。
+
+## Hugging Face モデルの回答生成と採点
+
+入力形式、設定、再実行、結果の見方は[モデル評価の README](../llm_jp_evaluation/README.md)でも詳しく説明しています。
+
+`main_evaluate_llm_jp.py` は、評価用 Q&A を使って指定モデルに回答を生成させ、別の Judge LLM で正確さと表現スタイルを採点します。標準設定では今治弁・標準語の各チャネル指定と low・medium・high の組み合わせを全問題で評価します。対象モデルは OpenAI 互換の `/v1/chat/completions` サーバーで事前に起動してください。対象の既定モデル ID は `ikedachin/llm-jp-4-8b-thinking-imabari-chikamiyama-v14` です。モデル自体のダウンロードやサーバー起動はこのプログラムには含まれません。サーバーは対象モデルの tokenizer と chat template を使い、`chat_template_kwargs` を適用して最終回答を `message.content` に返すよう設定してください。
+
+設定テンプレートをコピーして編集します。対象モデルの起動方法・メモリ要件はモデルと推論サーバーの環境によって異なります。例えば vLLM を別途インストールした環境では次の形式で起動します。リポジトリへのアクセス権やモデル固有のサーバー設定が必要な場合は、環境に合わせて指定してください。
+
+```bash
+vllm serve ikedachin/llm-jp-4-8b-thinking-imabari-chikamiyama-v14
+```
+
+```bash
+cp -n yamls/evaluate_llm_jp_settings_format.yaml yamls/evaluate_llm_jp_settings.yaml
+export OPENROUTER_API_KEY='ご自身のAPIキー'
+uv run python main_evaluate_llm_jp.py \
+  -p ./yamls/evaluate_llm_jp_settings.yaml \
+  -q ./test_output/eval_qa/validation.jsonl \
+  --stage generate
+
+uv run python main_evaluate_llm_jp.py \
+  -p ./yamls/evaluate_llm_jp_settings.yaml \
+  -q ./test_output/eval_qa/validation.jsonl \
+  --stage judge
+```
+
+`generate` では回答を生成して保存し、`judge` では保存された回答だけを採点します。`--stage both` または省略時は生成と採点を続けて実行します。
+
+`-q` は省略すると YAML の `eval_qa_path` を使います。設定ファイルの相対パスは実行時の作業ディレクトリ基準です。YAML の `target` と `judge` には、それぞれの `base_url`、サーバーに登録された `model` 名、生成設定、同時接続数を指定します。判定に OpenRouter を使わない場合は、`judge` を別の OpenAI 互換サーバーに変更し、必要なら `api_key_env` にキーを格納した環境変数名を指定してください。キー自体は設定ファイルに書きません。`chat_template_kwargs` などの推論パラメータは、接続先サーバーが対応している場合に `generation` へ追加できます。
+
+入力は JSON オブジェクト、JSON 配列、または JSONL です。ディレクトリを指定した場合は配下の JSON / JSONL を再帰的に読みます。各行には一意の `id` と、`question`、基準回答の `answer` が必要です。同一 ID の異なる `chunk_index` は別の項目です。キー名は YAML の `fields` で変更できます（例えば `id: qa_id`）。重複 ID と同一 `chunk_index` の組や必須値の欠落はエラーになります。
+
+```json
+{"id":"qa-1","question":"今治市は何県ですか？","answer":"愛媛県です。"}
+```
+
+`workers` は処理中の項目数の上限で、`target.max_in_flight` と `judge.max_in_flight` は各サーバーへの同時リクエスト数を個別に制限します。キューは有界ですが、入力データはメモリに読み込みます。429 や一時的なサーバーエラーなどは `max_attempts` の範囲で再試行します。返答の `finish_reason` が `length` の場合や、thinking のみで最終回答がない場合は失敗として記録します。サーバーが reasoning と回答を区別せずにプレーンテキストで返す場合は、区別できないためサーバー側の応答形式を確認してください。
+
+各リクエストには条件に応じた `valid_channels` と `reasoning_effort` を送ります。これらはテンプレート上の宣言であり、実際のチャネルや表現スタイルを強制しません。出力先には以下を保存します。
+
+- `answers.jsonl`: 対象モデルの生成した最終回答。
+- `all.jsonl`: 質問・基準回答・生成回答・Judge のスコア・ラベル・理由。
+- `failures.jsonl`: 生成または採点に失敗した項目。再実行時にも履歴は残ります。
+- `stats.json`: 全体とスタイル・effort 別の生成・採点済み件数、ラベル別件数、平均スコア、今回の失敗件数。
+- `manifest.json`: 再開時に設定や入力の変更を検知するための情報。
+
+同じ設定で再実行すると、採点済み項目をスキップし、生成済みで採点に失敗した項目は回答を再利用します。入力、モデル設定、判定プロンプトを変更した場合は、結果の混在を防ぐため別の `output_path` を指定してください。未採点の項目が残った実行は終了コード 1 を返します。Judge による評価結果は基準回答と Judge モデルの品質に依存します。

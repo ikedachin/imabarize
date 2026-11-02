@@ -1,0 +1,51 @@
+# Run from the repository root. The target and judge are separate services.
+eval_qa_path: ./test_output/eval_qa/validation.jsonl
+output_path: ./test_output/llm_jp_chikamiyama_v14_eval
+judge_prompt: ./prompts/judge_eval_qa/judge_answer.md
+style_judge_prompt: ./prompts/judge_eval_qa/judge_llm_jp_style.md
+fields:
+  id: id                 # use qa_id if that is the dataset's ID field
+  question: question
+  answer: answer
+
+# Number of items in progress. Each API also has its own concurrency limit.
+workers: 16
+
+# Each question is evaluated for every style × reasoning effort combination.
+# valid_channels controls the prompt declaration; it does not force generation.
+reasoning_efforts: [low, medium, high]
+styles:
+  imabari:
+    label: 今治弁
+    valid_channels: [analysis_imabari, final_imabari, commentary]
+  standard:
+    label: 標準語
+    valid_channels: [analysis, final, commentary]
+
+target:
+  base_url: http://localhost:8000/v1
+  model: ikedachin/llm-jp-4-8b-thinking-imabari-chikamiyama-v14
+  max_in_flight: 8
+  timeout: 600
+  max_attempts: 4
+  retry_wait_seconds: 0.5
+  # Optional: api_key_env: TARGET_API_KEY
+  generation:
+    max_tokens: 4096
+    temperature: 0
+    # The server must apply chat_template_kwargs with the target tokenizer.
+    chat_template_kwargs:
+      conversation_start_date: "2026-09-11"
+
+judge:
+  base_url: https://openrouter.ai/api/v1
+  model: qwen/qwen3.5-27b
+  api_key_env: OPENROUTER_API_KEY
+  max_in_flight: 8
+  timeout: 180
+  max_attempts: 4
+  retry_wait_seconds: 0.5
+  generation:
+    max_tokens: 2048
+    temperature: 0
+    top_p: 1.0

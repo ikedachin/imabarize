@@ -36,6 +36,7 @@ test_source/wiki/*
 /test_output/**
 !/test_output/**/
 !/test_output/**/.gitkeep
+!/test_output/eval_qa/all.jsonl
 
 /wiki/
 /wiki_test/

@@ -12,6 +12,7 @@ Wikipediaや既存の文章から、今治弁のQ&A、継続事前学習用のCP
 | --- | --- | --- |
 | 原文の抽出、通常のCPT・Q&Aを生成する | [メイン処理](docs/main/README.md) | `main_extract_wiki.py`、`main_create_cpt_dataset.py`、`main_create_imabari_qa.py` |
 | 生成済みデータをHugging Faceへ公開する | [アップロード](docs/upload/README.md) | `main_upload_dataset.py`、`tool_upload_for_llmjp4.py`、アップロード用Notebook 2本 |
+| 対象モデルに問題を解かせ、別モデルで採点する | [モデル評価](docs/llm_jp_evaluation/README.md) | `main_evaluate_llm_jp.py` |
 | 評価・GRPO・Reasoning Effortのデータを作る、旧形式を移行する | [特殊なデータセット](docs/special_datasets/README.md) | `main_create_eval_qa.py`、`main_judge_eval_qa.py`、`main_create_grpo_qa.py`、`main_create_reasoning_effort_dataset.py`、`migrate_*.py`、`tool_delete_generation_context.py` |
 
 各READMEに目的・入力と出力・設定・参考コマンドをまとめています。従来の生成設定・入出力形式・Reasoning Effortの詳細説明も用途別READMEに移しました。
@@ -27,7 +28,7 @@ uv sync
 以降のコマンドもすべてリポジトリルートで実行します。YAML内の相対パスは作業ディレクトリ基準です。`uv` を使わない場合は、仮想環境に `pyproject.toml` の依存関係を導入して `python` で実行してください。
 
 - `yamls/*_format.yaml` が共有設定テンプレートです。用途別READMEの例に従ってコピーし、入力・出力先、モデル名、API接続先を編集します。既存のローカル設定がある場合はその内容を確認して使用してください。
-- 通常のQ&A・CPT・評価・GRPOは、YAMLの `openrouter` と接続設定を使います。Reasoning Effortは独立した `generator` 設定と、`generator.api_key_env` が指す環境変数を使います。
+- 通常のQ&A・CPT・GRPOと既存の採点プログラムは、YAMLの `openrouter` と接続設定を使います。モデル評価は `target` / `judge`、Reasoning Effortは `generator` の接続設定と、各 `api_key_env` が指す環境変数を使います。
 - Hugging Face認証はアップロードツールごとに異なるため、[アップロード用README](docs/upload/README.md)を参照してください。
 - `test_source/` の入力、`test_output/` の生成結果、ローカル設定の多くはGit管理対象外です。コマンド例のデータは別途用意してください。
 
