@@ -247,7 +247,14 @@ uv run python main_evaluate_llm_jp.py \
   --stage generate
 ```
 
+
 採点時も同じ `-o` を指定し、`--stage judge` で実行します。新しい出力先は作成済みでないものを指定してください。
+```
+uv run python main_evaluate_llm_jp.py \
+  -p ./yamls/evaluate_llm_jp_settings.yaml \
+  -q ./test_output/eval_qa/all.jsonl \
+  --stage judge
+```
 
 ## 関連ファイル
 
