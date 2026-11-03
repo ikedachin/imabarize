@@ -530,7 +530,7 @@ uv run python main_evaluate_llm_jp.py \
 
 `generate` では回答を生成して保存し、`judge` では保存された回答だけを採点します。`--stage both` または省略時は生成と採点を続けて実行します。
 
-`-q` は省略すると YAML の `eval_qa_path` を使います。設定ファイルの相対パスは実行時の作業ディレクトリ基準です。YAML の `target` と `judge` には、それぞれの `base_url`、サーバーに登録された `model` 名、生成設定、同時接続数を指定します。判定に OpenRouter を使わない場合は、`judge` を別の OpenAI 互換サーバーに変更し、必要なら `api_key_env` にキーを格納した環境変数名を指定してください。キー自体は設定ファイルに書きません。`chat_template_kwargs` などの推論パラメータは、接続先サーバーが対応している場合に `generation` へ追加できます。
+`-q` / `--eval-qa` には問題と基準回答を含む評価用データを指定し、採点時も生成時と同じデータセットを使います。省略すると YAML の `eval_qa_path` を使います。生成済み回答は `output_path`（または `-o`）の `answers.jsonl` から読み込むため、評価結果のディレクトリを `-q` に指定しないでください。設定ファイルの相対パスは実行時の作業ディレクトリ基準です。YAML の `target` と `judge` には、それぞれの `base_url`、サーバーに登録された `model` 名、生成設定、同時接続数を指定します。判定に OpenRouter を使わない場合は、`judge` を別の OpenAI 互換サーバーに変更し、必要なら `api_key_env` にキーを格納した環境変数名を指定してください。キー自体は設定ファイルに書きません。`chat_template_kwargs` などの推論パラメータは、接続先サーバーが対応している場合に `generation` へ追加できます。
 
 入力は JSON オブジェクト、JSON 配列、または JSONL です。ディレクトリを指定した場合は配下の JSON / JSONL を再帰的に読みます。各行には一意の `id` と、`question`、基準回答の `answer` が必要です。同一 ID の異なる `chunk_index` は別の項目です。キー名は YAML の `fields` で変更できます（例えば `id: qa_id`）。重複 ID と同一 `chunk_index` の組や必須値の欠落はエラーになります。
 

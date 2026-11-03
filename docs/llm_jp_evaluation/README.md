@@ -60,6 +60,8 @@ JSONL の例です。1 行が 1 問に対応します。
 
 `id` と `chunk_index` の組み合わせが重複すると処理を停止します。`chunk_index` がない行は、同じ `id` を重複して使えません。JSONL のほか、JSON オブジェクトと JSON 配列も利用できます。ディレクトリを指定すると、配下の `.json` と `.jsonl` を再帰的に読み込みます。
 
+この問題と基準回答のデータを `--eval-qa`（または YAML の `eval_qa_path`）に指定します。回答生成時も採点時も同じデータセットを使ってください。評価結果の出力ディレクトリや、その中の `answers.jsonl` は評価用データセットではありません。ディレクトリ指定では配下の結果ファイルも読み込まれ、`Duplicate id and chunk_index` などのエラーになる場合があります。
+
 入力キーが `qa_id` の場合などは、次の手順の YAML の `fields` で指定できます。入力ファイルに含まれる `thinking` などの追加項目は、対象モデルには送られません。
 
 ## 2. 設定する
@@ -151,6 +153,8 @@ uv run python main_evaluate_llm_jp.py \
 
 回答生成後に、同じ設定ファイルと評価データを指定して Judge を実行します。この段階では対象モデルに接続せず、対象モデルの API キーも必要ありません。Judge API のキーが必要なら、ここで環境変数に設定します。
 
+`--eval-qa` は生成時と同じ問題・基準回答のファイルを指します。生成済み回答は、同じ出力先の `answers.jsonl` から自動的に読み込まれます。別の出力先を指定して生成した場合は、採点時にも `-o` で同じ出力先を指定してください。
+
 ```bash
 export OPENROUTER_API_KEY='ご自身のAPIキー'
 
@@ -162,12 +166,12 @@ uv run python main_evaluate_llm_jp.py \
 
 保存済みの回答だけを採点し、生成されていない条件の回答を自動生成することはありません。一部しか生成されていない場合は利用可能な回答を採点し、未採点の条件が残るため終了コード `1` を返します。その後、生成・採点それぞれを再実行できます。保存済み回答が一つもない場合はエラーになります。
 
-`--stage both` または `--stage` の省略時は、従来どおり回答生成と採点を続けて行います。
+`--stage both` または `--stage` の省略時は、回答生成と採点を続けて行います。
 
 | 引数 | 意味 |
 | --- | --- |
 | `-p`, `--settings` | 設定 YAML。省略時は `yamls/evaluate_llm_jp_settings_format.yaml`。 |
-| `-q`, `--eval-qa` | 評価データのファイルまたはディレクトリ。省略時は YAML の `eval_qa_path`。 |
+| `-q`, `--eval-qa` | 問題と基準回答を含む JSON / JSONL ファイルまたはディレクトリ。採点時も生成時と同じデータセットを指定する。省略時は YAML の `eval_qa_path`。 |
 | `-o`, `--output` | 出力先ディレクトリ。省略時は YAML の `output_path`。 |
 | `--stage` | `generate`（回答生成）、`judge`（採点）、`both`（両方）。省略時は `both`。 |
 
@@ -225,36 +229,7 @@ Judge は LLM であり、その判定は基準回答・Judge モデル・プロ
 
 同じ入力と設定で再実行すると、採点済みの「問題 × スタイル × effort」はスキップします。回答生成に成功して採点に失敗した条件は、`answers.jsonl` の回答を使って採点を再開します。生成に失敗した条件は、回答生成からやり直します。
 
-入力データや対象モデルの設定を変更した場合、結果の混在を防ぐため既存の出力先では再開できません。Judge の設定とプロンプトは採点開始時に固定され、それ以降に変更した場合も別の出力先が必要です。対象モデルと Judge の設定には並列数やタイムアウトなども含まれます。生成と採点の間に Judge を選ぶことは可能です。以前の一体実行で作成された出力は、従来どおり Judge の設定を含めて照合します。全件を新たに採点したい場合にも別の出力先を使えます。
-
-### 旧形式の生成結果を修復する
-
-以前のバージョンで `analysis_imabari ... assistant final_imabari ...` を回答全体として保存していた場合は、**生成プログラムを停止してから**、新しい出力先に最終回答を抽出できます。元ファイルは変更されません。採点結果が存在する出力は、このコマンドでは修復できません。
-
-```bash
-uv run python tool_recover_llm_jp_answers.py \
-  --source ./test_output/llm_jp_chikamiyama_v14_eval \
-  --output ./test_output/llm_jp_chikamiyama_v14_eval_recovered
-```
-
-抽出できなかった行は新しい出力先の `rejected_answers.jsonl` に保存し、未生成扱いにします。未生成の条件は以下のコマンドで生成し直せます。
-
-```bash
-uv run python main_evaluate_llm_jp.py \
-  -p ./yamls/evaluate_llm_jp_settings.yaml \
-  -q ./test_output/eval_qa/all.jsonl \
-  -o ./test_output/llm_jp_chikamiyama_v14_eval_recovered \
-  --stage generate
-```
-
-
-採点時も同じ `-o` を指定し、`--stage judge` で実行します。新しい出力先は作成済みでないものを指定してください。
-```bash
-uv run python main_evaluate_llm_jp.py \
-  -p ./yamls/evaluate_llm_jp_settings.yaml \
-  -q ./test_output/eval_qa/all.jsonl \
-  --stage judge
-```
+入力データや対象モデルの設定を変更した場合、結果の混在を防ぐため既存の出力先では再開できません。Judge の設定とプロンプトは採点開始時に固定され、それ以降に変更した場合も別の出力先が必要です。対象モデルと Judge の設定には並列数やタイムアウトなども含まれます。生成と採点の間に Judge を選ぶことは可能です。全件を新たに採点したい場合にも別の出力先を使えます。
 
 ## 関連ファイル
 

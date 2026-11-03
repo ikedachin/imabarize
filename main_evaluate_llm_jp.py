@@ -13,7 +13,10 @@ from pipelines.evaluate_llm_jp import EvaluationError, evaluate
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("-p", "--settings", default="./yamls/evaluate_llm_jp_settings_format.yaml")
-    parser.add_argument("-q", "--eval-qa", help="Evaluation JSON/JSONL file or directory (overrides YAML)")
+    parser.add_argument(
+        "-q", "--eval-qa",
+        help="JSON/JSONL file or directory containing evaluation questions and reference answers (overrides YAML); use the same dataset as generation when judging",
+    )
     parser.add_argument("-o", "--output", help="Output directory (overrides YAML output_path)")
     parser.add_argument("--stage", choices=("generate", "judge", "both"), default="both",
                         help="Generate answers, judge saved answers, or run both (default: both)")
